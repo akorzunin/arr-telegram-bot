@@ -2,6 +2,7 @@ services:
   arr-telegram-bot:
     build: .
     restart: unless-stopped
+    user: "${BOT_UID:-1000}:${BOT_GID:-1000}"
     env_file: ${ARR_BOT_ENV_FILE:-/srv/deploy/arr/bot.env}
     environment:
       RADARR_URL: http://radarr:7878
