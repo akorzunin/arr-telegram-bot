@@ -1,6 +1,6 @@
 # ARR Telegram bot (standalone Go)
 
-Private-chat long-polling bot for Radarr and Sonarr; no third-party Go modules or public webhook. This repository is independent of the Ansible repository. **Do not run alongside the Python bot with the same Telegram token** (competing getUpdates consumers). No deployment is performed by this repo.
+Private-chat long-polling bot for Radarr and Sonarr; no third-party Go modules or public webhook. This repository is independent of the Ansible repository. CI publishes `ghcr.io/akorzunin/arr-telegram-bot:latest`; the ARR Ansible repository runs that image in its existing Compose stack. **Do not run alongside the Python bot with the same Telegram token** (competing getUpdates consumers). No deployment is performed by this repo.
 
 ## Contract
 
@@ -15,9 +15,9 @@ Requires these variables (normally `/srv/deploy/arr/bot.env`):
 | `RADARR_URL`, `SONARR_URL` | Internal ARR URLs (compose overrides to `http://radarr:7878`, `http://sonarr:8989`) |
 | `RADARR_ROOT`, `SONARR_ROOT` | Root folder paths inside ARR |
 
-Compose uses external network `arr_shared`, which must already exist and include Radarr and Sonarr with DNS names `radarr` and `sonarr`. `ARR_BOT_ENV_FILE` overrides the default env file path `/srv/deploy/arr/bot.env`. Compose sets the workstation proxy at `host.docker.internal:20171` for Telegram and bypasses it for the two ARR names. It sets media root paths to the ARR stack defaults. The process runs as `${BOT_UID:-1000}:${BOT_GID:-1000}`; set these in the standalone Compose `.env` to the owner of `/srv/deploy/arr/config/bot`. The Ansible deployment sets them from the target account. Mount `/srv/deploy/arr/config/bot:/state` writable; the existing `/state/offset` is retained. `/state/notifications.json` holds imported-event checkpoints, request/chat mapping and delivery dedupe. Mount it persistently and back it up; it contains chat IDs and titles, not credentials. The process logs generic errors only, never URLs or response bodies containing secrets.
+The ARR Compose stack sets internal Radarr/Sonarr URLs, media roots, and the workstation proxy at `host.docker.internal:20171` for Telegram; it bypasses the proxy for the two ARR names. The container runs as the ARR deployment user and mounts `/srv/deploy/arr/config/bot:/state` writable. The existing `/state/offset` is retained. `/state/notifications.json` holds imported-event checkpoints, request/chat mapping and delivery dedupe. Mount it persistently and back it up; it contains chat IDs and titles, not credentials. The process logs generic errors only, never URLs or response bodies containing secrets.
 
-Build/test: `go test ./... && go vet ./...`; `CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o arr-telegram-bot .`. Compose build: `docker compose build`. There are no ports to expose.
+Build/test: `go test ./... && go vet ./...`; `CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o arr-telegram-bot .`. Publishing from `master` is handled by `.github/workflows/image.yml`. There are no ports to expose. A private GHCR package may require `docker login ghcr.io` with read:packages on the target host.
 
 ## Behavior
 
