@@ -1,0 +1,18 @@
+services:
+  arr-telegram-bot:
+    build: .
+    restart: unless-stopped
+    env_file: ${ARR_BOT_ENV_FILE:-/srv/deploy/arr/bot.env}
+    environment:
+      RADARR_URL: http://radarr:7878
+      SONARR_URL: http://sonarr:8989
+      NO_PROXY: radarr,sonarr,localhost,127.0.0.1
+      no_proxy: radarr,sonarr,localhost,127.0.0.1
+    networks:
+      - arr_shared
+    volumes:
+      - /srv/deploy/arr/config/bot:/state
+networks:
+  arr_shared:
+    external: true
+    name: arr_shared
