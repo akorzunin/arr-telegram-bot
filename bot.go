@@ -441,43 +441,64 @@ func (b *Bot) add(v *Selection) error {
 		}
 	}
 	if existing != nil && v.Kind == "movie" {
-		return b.send(v.Chat, "Already in the library manager; monitoring and search settings were left unchanged.", nil)
+		if existing["hasFile"] != false {
+			return b.send(v.Chat, "Already in the library manager; monitoring and search settings were left unchanged.", nil)
+		}
+		rows, err := b.queue("movie")
+		if err != nil {
+			return err
+		}
+		for _, row := range rows {
+			if number(row["movieId"]) == number(existing["id"]) {
+				return b.send(v.Chat, "Already has an active download or pending release in Radarr; no duplicate search was queued. Check /active or Radarr's queue.", nil)
+			}
+		}
 	}
 	id := 0
 	episodeIDs := []int{}
 	if existing != nil {
 		id = number(existing["id"])
-		found := false
-		for _, s := range seasons(existing) {
-			if number(s["seasonNumber"]) == v.Season {
-				s["monitored"] = true
-				found = true
-			}
-		}
-		if !found {
-			return b.send(v.Chat, "Season not present in Sonarr yet. Refresh the series and try again.", nil)
-		}
-		existing["monitored"] = true
-		existing["monitorNewItems"] = "none"
-		if err := b.arr("series", fmt.Sprintf("/%d", id), existing, "PUT", nil); err != nil {
-			return err
-		}
-		var episodes []map[string]any
-		if err := b.arr("series", fmt.Sprintf("/episode?seriesId=%d", id), nil, "", &episodes); err != nil {
-			return err
-		}
-		for _, e := range episodes {
-			if number(e["seasonNumber"]) == v.Season {
-				episodeIDs = append(episodeIDs, number(e["id"]))
-			}
-		}
-		if len(episodeIDs) > 0 {
-			if err := b.arr("series", "/episode/monitor", map[string]any{"episodeIds": episodeIDs, "monitored": true}, "PUT", nil); err != nil {
+		if v.Kind == "movie" {
+			existing["monitored"] = true
+			if err := b.arr("movie", fmt.Sprintf("/%d", id), existing, "PUT", nil); err != nil {
 				return err
 			}
-		}
-		if err := b.arr("series", "/command", map[string]any{"name": "SeasonSearch", "seriesId": id, "seasonNumber": v.Season}, "", nil); err != nil {
-			return err
+			if err := b.arr("movie", "/command", map[string]any{"name": "MoviesSearch", "movieIds": []int{id}}, "", nil); err != nil {
+				return err
+			}
+		} else {
+			found := false
+			for _, s := range seasons(existing) {
+				if number(s["seasonNumber"]) == v.Season {
+					s["monitored"] = true
+					found = true
+				}
+			}
+			if !found {
+				return b.send(v.Chat, "Season not present in Sonarr yet. Refresh the series and try again.", nil)
+			}
+			existing["monitored"] = true
+			existing["monitorNewItems"] = "none"
+			if err := b.arr("series", fmt.Sprintf("/%d", id), existing, "PUT", nil); err != nil {
+				return err
+			}
+			var episodes []map[string]any
+			if err := b.arr("series", fmt.Sprintf("/episode?seriesId=%d", id), nil, "", &episodes); err != nil {
+				return err
+			}
+			for _, e := range episodes {
+				if number(e["seasonNumber"]) == v.Season {
+					episodeIDs = append(episodeIDs, number(e["id"]))
+				}
+			}
+			if len(episodeIDs) > 0 {
+				if err := b.arr("series", "/episode/monitor", map[string]any{"episodeIds": episodeIDs, "monitored": true}, "PUT", nil); err != nil {
+					return err
+				}
+			}
+			if err := b.arr("series", "/command", map[string]any{"name": "SeasonSearch", "seriesId": id, "seasonNumber": v.Season}, "", nil); err != nil {
+				return err
+			}
 		}
 	} else {
 		p, err := buildPayload(v.Kind, v.Item, b.app(v.Kind), v.Season)

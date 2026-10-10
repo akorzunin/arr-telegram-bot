@@ -218,7 +218,7 @@ func TestExistingSeasonRequest(t *testing.T) {
 }
 func TestExistingMovieUnchanged(t *testing.T) {
 	r := setup(t)
-	r.existingMovie = []map[string]any{{"id": 77, "tmdbId": 21}}
+	r.existingMovie = []map[string]any{{"id": 77, "tmdbId": 21, "hasFile": true}}
 	if err := r.bot.handle(msg("/movie Film")); err != nil {
 		t.Fatal(err)
 	}
@@ -228,6 +228,57 @@ func TestExistingMovieUnchanged(t *testing.T) {
 		t.Fatalf("existing altered: %v %#v", r.added, r.bot.state.Requests)
 	}
 }
+func TestExistingMissingMovieResumesAfterConfirmation(t *testing.T) {
+	r := setup(t)
+	r.existingMovie = []map[string]any{{"id": 81, "tmdbId": 21, "hasFile": false, "monitored": false, "qualityProfileId": 7, "path": "/existing/movie"}}
+	r.bot.state.Requests = []RequestRecord{{Kind: "movie", ItemID: 81, Chat: 70, Cancelled: true}}
+	if err := r.bot.handle(msg("/movie Film")); err != nil {
+		t.Fatal(err)
+	}
+	r.action(t, "pick")
+	if len(r.added) != 0 {
+		t.Fatal("resumed before confirmation")
+	}
+	r.action(t, "add")
+	if len(r.added) != 2 || !hasCall(r.calls, "PUT /api/v3/movie/81") || hasCall(r.calls, "POST /api/v3/movie?") {
+		t.Fatalf("duplicate movie or missing update: %v %v", r.calls, r.added)
+	}
+	if r.added[0]["monitored"] != true || r.added[0]["qualityProfileId"] != float64(7) || r.added[0]["path"] != "/existing/movie" {
+		t.Fatal("existing movie preferences changed", r.added[0])
+	}
+	if r.added[1]["name"] != "MoviesSearch" || fmt.Sprint(r.added[1]["movieIds"]) != "[81]" {
+		t.Fatal("wrong search scope", r.added[1])
+	}
+	if len(r.bot.state.Requests) != 2 || !r.bot.state.Requests[0].Cancelled || r.bot.state.Requests[1].Cancelled || r.bot.state.Requests[1].ItemID != 81 {
+		t.Fatal("resumed request not tracked", r.bot.state.Requests)
+	}
+	r.historyMovie = []map[string]any{{"id": 1, "movieId": 81, "eventType": "downloadFolderImported"}}
+	n := len(r.messages)
+	if err := r.bot.pollHistory(); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.messages) != n+1 {
+		t.Fatal("resumed import should notify once", r.messages[n:])
+	}
+}
+
+func TestExistingActiveMovieDoesNotSearchAgain(t *testing.T) {
+	r := setup(t)
+	r.existingMovie = []map[string]any{{"id": 81, "tmdbId": 21, "hasFile": false, "monitored": true}}
+	r.queueMovie = []map[string]any{{"id": 101, "movieId": 81, "downloadId": "abcd"}}
+	if err := r.bot.handle(msg("/movie Film")); err != nil {
+		t.Fatal(err)
+	}
+	r.action(t, "pick")
+	r.action(t, "add")
+	if len(r.added) != 0 || len(r.bot.state.Requests) != 0 {
+		t.Fatal("active download was searched again")
+	}
+	if !strings.Contains(r.messages[len(r.messages)-1], "active download") {
+		t.Fatal(r.messages)
+	}
+}
+
 func TestPrivateAllowlistExpiryAndCancel(t *testing.T) {
 	r := setup(t)
 	m := msg("Film")
