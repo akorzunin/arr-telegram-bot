@@ -72,7 +72,7 @@ func TestCancellationRequiresConfirmationAndOwnership(t *testing.T) {
 func TestMovieCancellationKeepsDataAndPersists(t *testing.T) {
 	r := setup(t)
 	movieRequest(r)
-	r.queueGone = true // ARR may notice the removed torrent before DELETE arrives.
+	r.failQueueDelete = true // Regression: Radarr's redundant IgnoreDownload call crashed.
 	if err := r.bot.handle(msg("/cancel 1")); err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +87,7 @@ func TestMovieCancellationKeepsDataAndPersists(t *testing.T) {
 	if args["delete-local-data"] != false || fmt.Sprint(args["ids"]) != "[abcd]" {
 		t.Fatal(args)
 	}
-	if !hasCall(r.calls, "DELETE /api/v3/queue/101?") || !r.bot.state.Requests[0].Cancelled {
+	if hasCall(r.calls, "DELETE /api/v3/queue/") || !r.bot.state.Requests[0].Cancelled {
 		t.Fatal(r.calls)
 	}
 	clone := newBot(r.bot.cfg, r.server.Client())
@@ -126,8 +126,8 @@ func TestSeriesCancellationPreservesOtherSeasonAndDeduplicatesTorrent(t *testing
 	if len(r.transmission) != 1 || fmt.Sprint(r.transmission[0]["arguments"].(map[string]any)["ids"]) != "[abcd]" {
 		t.Fatal(r.transmission)
 	}
-	if hasCall(r.calls, "DELETE /api/v3/queue/103") {
-		t.Fatal("other season removed")
+	if hasCall(r.calls, "DELETE /api/v3/queue/") {
+		t.Fatal("torrent was unnecessarily ignored in ARR")
 	}
 }
 
@@ -193,6 +193,36 @@ func TestQueuePaginationAndWaitingRequest(t *testing.T) {
 	}
 	if len(r.transmission) != 0 || !r.bot.state.Requests[0].Cancelled {
 		t.Fatal("waiting request cancellation")
+	}
+}
+
+func TestPendingReleaseCancellation(t *testing.T) {
+	for _, gone := range []bool{false, true} {
+		t.Run(fmt.Sprint(gone), func(t *testing.T) {
+			r := setup(t)
+			movieRequest(r)
+			r.queueGone = gone
+			r.queueMovie = []map[string]any{{"id": 101, "movieId": 81, "status": "delay"}}
+			if err := r.bot.cancelRequest(70, 1); err != nil {
+				t.Fatal(err)
+			}
+			if !hasCall(r.calls, "DELETE /api/v3/queue/101?") || len(r.transmission) != 0 || !r.bot.state.Requests[0].Cancelled {
+				t.Fatal("pending release was not cleared safely")
+			}
+		})
+	}
+}
+
+func TestPendingReleaseFailureRemainsRetryable(t *testing.T) {
+	r := setup(t)
+	movieRequest(r)
+	r.queueMovie = []map[string]any{{"id": 101, "movieId": 81, "status": "delay"}}
+	r.failQueueDelete = true
+	if err := r.bot.cancelRequest(70, 1); err == nil || !strings.Contains(err.Error(), "remove pending ARR release") {
+		t.Fatal("missing pending-release failure context")
+	}
+	if r.bot.state.Requests[0].Cancelled || len(r.transmission) != 0 {
+		t.Fatal("failed pending release lost")
 	}
 }
 

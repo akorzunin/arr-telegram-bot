@@ -14,23 +14,24 @@ import (
 )
 
 type rig struct {
-	t              *testing.T
-	server         *httptest.Server
-	bot            *Bot
-	calls          []string
-	messages       []string
-	failSend       bool
-	historyMovie   []map[string]any
-	historySeries  []map[string]any
-	existingMovie  []map[string]any
-	existingSeries []map[string]any
-	added          []map[string]any
-	episodes       []map[string]any
-	queueMovie     []map[string]any
-	queueSeries    []map[string]any
-	transmission   []map[string]any
-	failRemove     bool
-	queueGone      bool
+	t               *testing.T
+	server          *httptest.Server
+	bot             *Bot
+	calls           []string
+	messages        []string
+	failSend        bool
+	historyMovie    []map[string]any
+	historySeries   []map[string]any
+	existingMovie   []map[string]any
+	existingSeries  []map[string]any
+	added           []map[string]any
+	episodes        []map[string]any
+	queueMovie      []map[string]any
+	queueSeries     []map[string]any
+	transmission    []map[string]any
+	failRemove      bool
+	queueGone       bool
+	failQueueDelete bool
 }
 
 func setup(t *testing.T) *rig {
@@ -105,6 +106,10 @@ func (r *rig) serve(w http.ResponseWriter, q *http.Request) {
 		}
 		if r.queueGone {
 			w.WriteHeader(404)
+			return
+		}
+		if r.failQueueDelete {
+			w.WriteHeader(500) // Radarr IgnoreDownload can crash after torrent removal.
 			return
 		}
 	case path == "/transmission/rpc":

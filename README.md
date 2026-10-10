@@ -33,8 +33,11 @@ Send a plain title to search both apps, `/movie TITLE`, or `/series TITLE S02` (
 - `/cancel NUMBER` uses the stable request number from `/active` and requires a
   user/chat-bound confirmation within 15 minutes. It disables monitoring for the
   movie or selected season and its episodes, leaving other seasons unchanged.
-  It removes the torrents through Transmission RPC with `delete-local-data=false`,
-  then clears ARR queue entries without blocklisting or searching for replacements.
+  It removes the torrents through Transmission RPC with `delete-local-data=false`;
+  ARR clears these entries on its next download-client poll. Explicitly ignoring
+  an already-removed torrent can crash Radarr's `IgnoreDownload` handler, so no
+  redundant queue deletion is sent. Pending releases without torrents are removed
+  from ARR's delay queue. No releases are blocklisted or searched for replacements.
   ARR's own `removeFromClient=true` would delete files and is deliberately not used.
   Torrent removal negotiates Transmission's 409 session-ID challenge. The current
   stack has RPC authentication disabled; keep that endpoint private.

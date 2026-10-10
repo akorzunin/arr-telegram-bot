@@ -59,18 +59,20 @@ func main() {
 	for {
 		if err := bot.pollHistory(); err == nil {
 			break
+		} else {
+			log.Printf("History polling failed; retrying: %v", err)
 		}
-		log.Print("History polling failed; retrying")
 		time.Sleep(5 * time.Second)
 	}
 	// A short getUpdates long-poll ensures imports are checked regularly, even when chat is idle.
 	for {
 		if err := bot.pollUpdates(); err != nil {
-			log.Print("Telegram polling failed; retrying")
+			// API errors deliberately omit endpoints/bodies, so this includes no tokens.
+			log.Printf("Telegram/update processing failed; retrying: %v", err)
 			time.Sleep(5 * time.Second)
 		}
 		if err := bot.pollHistory(); err != nil {
-			log.Print("History polling failed; retrying")
+			log.Printf("History polling failed; retrying: %v", err)
 			time.Sleep(5 * time.Second)
 		}
 	}

@@ -270,14 +270,19 @@ func (b *Bot) cancelRequest(chat int64, n int) error {
 	}
 	if len(ids) > 0 {
 		if err := b.removeTorrents(ids); err != nil {
-			return err // Keep request retryable after a partial failure.
+			return fmt.Errorf("remove Transmission torrents: %w", err) // Keep a partial failure retryable.
 		}
 	}
 	for _, row := range selected {
-		// ARR removeFromClient=true deletes data, so removal is done via Transmission first.
+		if hash, ok := row["downloadId"].(string); ok && hash != "" {
+			// ARR clears removed torrents on its next poll. Explicitly ignoring them
+			// can crash IgnoreDownload after their tracking metadata disappears.
+			continue
+		}
+		// Pending releases have no torrent; remove only their ARR delay-queue entry.
 		path := fmt.Sprintf("/queue/%d?removeFromClient=false&blocklist=false&skipRedownload=true", number(row["id"]))
 		if err := b.arr(req.Kind, path, nil, "DELETE", nil); err != nil && err.Error() != "HTTP 404" {
-			return err // Queue may already have disappeared after torrent removal.
+			return fmt.Errorf("remove pending ARR release: %w", err)
 		}
 	}
 	for i := range b.state.Requests {
