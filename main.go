@@ -11,6 +11,10 @@ import (
 
 func configFromEnv() (Config, error) {
 	cfg := Config{Token: strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN")), StateDir: "/state", Allowed: map[int64]bool{}}
+	cfg.TransmissionURL = strings.TrimSpace(os.Getenv("TRANSMISSION_URL"))
+	if cfg.TransmissionURL == "" {
+		cfg.TransmissionURL = "http://host.docker.internal:9092/transmission/rpc"
+	}
 	if cfg.Token == "" {
 		return cfg, errors.New("missing bot token")
 	}

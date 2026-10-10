@@ -27,6 +27,7 @@ type Config struct {
 	Token                 string
 	Allowed               map[int64]bool
 	StateDir, TelegramURL string
+	TransmissionURL       string
 	Movie, Series         AppConfig
 }
 type RequestRecord struct {
@@ -37,6 +38,7 @@ type RequestRecord struct {
 	Label      string `json:"label"`
 	EpisodeIDs []int  `json:"episode_ids,omitempty"`
 	Notified   []int  `json:"notified,omitempty"`
+	Cancelled  bool   `json:"cancelled,omitempty"`
 }
 type State struct {
 	Offset   int64           `json:"offset"`
@@ -44,13 +46,14 @@ type State struct {
 	Requests []RequestRecord `json:"requests"`
 }
 type Selection struct {
-	Kind       string
-	Item       map[string]any
-	User, Chat int64
-	Expires    time.Time
-	Label      string
-	Season     int
-	Confirmed  bool
+	Kind          string
+	Item          map[string]any
+	User, Chat    int64
+	Expires       time.Time
+	Label         string
+	Season        int
+	Confirmed     bool
+	RequestNumber int // One-based persistent request index for cancellation confirmation.
 }
 type Bot struct {
 	cfg     Config
@@ -210,7 +213,7 @@ func (b *Bot) app(kind string) AppConfig {
 func (b *Bot) arr(kind, path string, data any, method string, out any) error {
 	app := b.app(kind)
 	resource := kind
-	if path == "/command" || strings.HasPrefix(path, "/episode") || strings.HasPrefix(path, "/history") {
+	if path == "/command" || strings.HasPrefix(path, "/episode") || strings.HasPrefix(path, "/history") || strings.HasPrefix(path, "/queue") {
 		resource = ""
 	}
 	endpoint := strings.TrimRight(app.URL, "/") + "/api/v3/" + resource + strings.TrimPrefix(path, "/")
@@ -260,7 +263,7 @@ func (b *Bot) search(chat, user int64, text string) error {
 		kind = "series"
 	}
 	if text == "" || strings.HasPrefix(text, "/") {
-		return b.send(chat, "Send a title, /movie TITLE, or /series TITLE S02. Series default to season 1; only the requested season is monitored. Choose a match, then confirm. Plot descriptions are not supported yet.", nil)
+		return b.send(chat, "Send a title, /movie TITLE, or /series TITLE S02. Series default to season 1; only the requested season is monitored. Choose a match, then confirm. /active lists your downloads; /cancel NUMBER cancels a request after confirmation, keeping files. Plot descriptions are not supported yet.", nil)
 	}
 	if len(text) > 200 {
 		return b.send(chat, "Please use a title of at most 200 characters.", nil)
@@ -383,7 +386,15 @@ func (b *Bot) callback(q Callback) error {
 	case "cancel":
 		delete(b.pending, key)
 		return b.send(chat, "Cancelled.", nil)
+	case "stop":
+		if v.RequestNumber > 0 {
+			delete(b.pending, key)
+			return b.cancelRequest(chat, v.RequestNumber)
+		}
 	case "pick":
+		if v.RequestNumber > 0 {
+			return nil
+		}
 		if v.Kind == "series" {
 			found := false
 			for _, s := range seasons(v.Item) {
@@ -507,10 +518,18 @@ func (b *Bot) handle(u Update) error {
 	if u.Callback != nil {
 		err = b.callback(*u.Callback)
 	} else if u.Message != nil && u.Message.Text != "" {
-		err = b.search(chat.ID, from.ID, u.Message.Text)
+		text := strings.TrimSpace(u.Message.Text)
+		switch {
+		case text == "/active" || text == "/downloads":
+			err = b.active(chat.ID)
+		case text == "/cancel" || strings.HasPrefix(text, "/cancel "):
+			err = b.confirmCancellation(chat.ID, from.ID, text)
+		default:
+			err = b.search(chat.ID, from.ID, text)
+		}
 	}
 	if err != nil {
-		_ = b.send(chat.ID, "Request failed. Check Radarr/Sonarr before retrying: a timed-out request may already have been added.", nil)
+		_ = b.send(chat.ID, "Operation failed or only partly completed. Check Radarr/Sonarr and Transmission before retrying: a timed-out operation may have succeeded.", nil)
 	}
 	return err
 }
@@ -596,7 +615,7 @@ func (b *Bot) pollHistory() error {
 				}
 				for i := range b.state.Requests {
 					req := &b.state.Requests[i]
-					if req.Kind != kind || req.ItemID != number(row[itemField]) || contains(req.Notified, id) {
+					if req.Cancelled || req.Kind != kind || req.ItemID != number(row[itemField]) || contains(req.Notified, id) {
 						continue
 					}
 					if kind == "series" {

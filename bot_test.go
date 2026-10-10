@@ -26,6 +26,11 @@ type rig struct {
 	existingSeries []map[string]any
 	added          []map[string]any
 	episodes       []map[string]any
+	queueMovie     []map[string]any
+	queueSeries    []map[string]any
+	transmission   []map[string]any
+	failRemove     bool
+	queueGone      bool
 }
 
 func setup(t *testing.T) *rig {
@@ -33,7 +38,7 @@ func setup(t *testing.T) *rig {
 	r := &rig{t: t, episodes: []map[string]any{{"id": 41, "seasonNumber": 2}, {"id": 42, "seasonNumber": 1}}}
 	r.server = httptest.NewServer(http.HandlerFunc(r.serve))
 	t.Cleanup(r.server.Close)
-	r.bot = newBot(Config{Token: "test-token", Allowed: map[int64]bool{7: true}, StateDir: t.TempDir(), TelegramURL: r.server.URL, Movie: AppConfig{URL: r.server.URL, Key: "secret", Profile: 1, Root: "/movies"}, Series: AppConfig{URL: r.server.URL, Key: "series-secret", Profile: 2, Root: "/series"}}, r.server.Client())
+	r.bot = newBot(Config{Token: "test-token", Allowed: map[int64]bool{7: true}, StateDir: t.TempDir(), TelegramURL: r.server.URL, TransmissionURL: r.server.URL + "/transmission/rpc", Movie: AppConfig{URL: r.server.URL, Key: "secret", Profile: 1, Root: "/movies"}, Series: AppConfig{URL: r.server.URL, Key: "series-secret", Profile: 2, Root: "/series"}}, r.server.Client())
 	if err := r.bot.load(); err != nil {
 		t.Fatal(err)
 	}
@@ -72,9 +77,48 @@ func (r *rig) serve(w http.ResponseWriter, q *http.Request) {
 	case path == "/api/v3/series" && q.Method == "POST":
 		r.added = append(r.added, body)
 		reply = map[string]any{"id": 82}
-	case path == "/api/v3/series/91" && q.Method == "PUT":
+	case (path == "/api/v3/series/91" || path == "/api/v3/movie/81") && q.Method == "PUT":
 		r.added = append(r.added, body)
 		reply = body
+	case path == "/api/v3/movie/81" && q.Method == "GET":
+		reply = map[string]any{"id": 81, "monitored": true, "hasFile": false}
+	case path == "/api/v3/series/91" && q.Method == "GET":
+		reply = map[string]any{"id": 91, "monitored": true, "monitorNewItems": "none", "seasons": []map[string]any{{"seasonNumber": 1, "monitored": true}, {"seasonNumber": 2, "monitored": true}}}
+	case path == "/api/v3/queue" && q.Method == "GET":
+		rows := r.queueMovie
+		if q.Header.Get("X-Api-Key") == "series-secret" {
+			rows = r.queueSeries
+		}
+		page, _ := strconv.Atoi(q.URL.Query().Get("page"))
+		start := (page - 1) * 100
+		end := start + 100
+		if end > len(rows) {
+			end = len(rows)
+		}
+		if start > end {
+			start = end
+		}
+		reply = map[string]any{"records": rows[start:end], "totalRecords": len(rows)}
+	case strings.HasPrefix(path, "/api/v3/queue/") && q.Method == "DELETE":
+		if q.URL.Query().Get("removeFromClient") != "false" || q.URL.Query().Get("blocklist") != "false" || q.URL.Query().Get("skipRedownload") != "true" {
+			r.t.Error("unsafe queue deletion")
+		}
+		if r.queueGone {
+			w.WriteHeader(404)
+			return
+		}
+	case path == "/transmission/rpc":
+		if q.Header.Get("X-Transmission-Session-Id") != "session-test" {
+			w.Header().Set("X-Transmission-Session-Id", "session-test")
+			w.WriteHeader(409)
+			return
+		}
+		r.transmission = append(r.transmission, body)
+		if r.failRemove {
+			w.WriteHeader(500)
+			return
+		}
+		reply = map[string]any{"result": "success"}
 	case path == "/api/v3/episode":
 		reply = r.episodes
 	case path == "/api/v3/episode/monitor":
