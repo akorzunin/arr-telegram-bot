@@ -32,6 +32,9 @@ type rig struct {
 	failRemove      bool
 	queueGone       bool
 	failQueueDelete bool
+	movieDetail     map[string]any
+	seriesDetail    map[string]any
+	episodeFiles    map[int]map[string]any
 }
 
 func setup(t *testing.T) *rig {
@@ -83,8 +86,14 @@ func (r *rig) serve(w http.ResponseWriter, q *http.Request) {
 		reply = body
 	case path == "/api/v3/movie/81" && q.Method == "GET":
 		reply = map[string]any{"id": 81, "monitored": true, "hasFile": false}
+		if r.movieDetail != nil {
+			reply = r.movieDetail
+		}
 	case path == "/api/v3/series/91" && q.Method == "GET":
 		reply = map[string]any{"id": 91, "monitored": true, "monitorNewItems": "none", "seasons": []map[string]any{{"seasonNumber": 1, "monitored": true}, {"seasonNumber": 2, "monitored": true}}}
+		if r.seriesDetail != nil {
+			reply = r.seriesDetail
+		}
 	case path == "/api/v3/queue" && q.Method == "GET":
 		rows := r.queueMovie
 		if q.Header.Get("X-Api-Key") == "series-secret" {
@@ -124,6 +133,9 @@ func (r *rig) serve(w http.ResponseWriter, q *http.Request) {
 			return
 		}
 		reply = map[string]any{"result": "success"}
+	case strings.HasPrefix(path, "/api/v3/episodefile/"):
+		id, _ := strconv.Atoi(strings.TrimPrefix(path, "/api/v3/episodefile/"))
+		reply = r.episodeFiles[id]
 	case path == "/api/v3/episode":
 		reply = r.episodes
 	case path == "/api/v3/episode/monitor":

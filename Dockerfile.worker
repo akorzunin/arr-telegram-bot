@@ -1,0 +1,14 @@
+FROM golang:1.23-alpine AS build
+WORKDIR /src
+COPY go.mod *.go ./
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /arr-telegram-bot .
+
+# Ubuntu FFmpeg includes NVENC. NVIDIA Container Toolkit supplies the host's
+# libnvidia-encode driver; do not bake a second GPU driver into this image.
+FROM ubuntu:24.04
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=build /arr-telegram-bot /arr-telegram-bot
+ENV NVIDIA_VISIBLE_DEVICES=all NVIDIA_DRIVER_CAPABILITIES=video,utility,compute
+USER 65532:65532
+ENTRYPOINT ["/arr-telegram-bot", "--worker"]

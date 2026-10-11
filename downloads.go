@@ -98,9 +98,40 @@ func (b *Bot) active(chat int64) error {
 				return err
 			}
 			if complete {
-				continue
+				if b.cfg.PreparationDir == "" {
+					continue
+				}
+				if len(req.Preparation) == 0 {
+					lines = append(lines, "Downloaded · waiting for compatibility check")
+				} else {
+					allReady := true
+					for _, ref := range req.Preparation {
+						if b.preparationResult(ref).State != "ready" {
+							allReady = false
+							break
+						}
+					}
+					if allReady {
+						continue
+					}
+				}
+			} else {
+				lines = append(lines, "No active torrent: search pending or no eligible release found.")
 			}
-			lines = append(lines, "No active torrent: search pending or no eligible release found.")
+		}
+		for _, ref := range req.Preparation {
+			result := b.preparationResult(ref)
+			status := result.State
+			if result.State == "preparing" {
+				status = fmt.Sprintf("%s · %d%%", result.Action, result.Progress)
+			}
+			if result.Detail != "" {
+				status += " · " + result.Detail
+			}
+			if result.Warning != "" {
+				status += " · " + result.Warning
+			}
+			lines = append(lines, ref.Label+" — "+status)
 		}
 		label := req.Label
 		if req.Kind == "series" {
@@ -292,6 +323,9 @@ func (b *Bot) cancelRequest(chat int64, n int) error {
 		}
 	}
 	if err := b.save(); err != nil {
+		return err
+	}
+	if err := b.cancelUnusedPreparation(); err != nil {
 		return err
 	}
 	return b.send(chat, "Cancelled. Monitoring disabled for this movie/season; torrent files were kept. Already-running searches may still finish: check ARR's queue.", nil)

@@ -24,21 +24,23 @@ type AppConfig struct {
 	Profile        int
 }
 type Config struct {
-	Token                 string
-	Allowed               map[int64]bool
-	StateDir, TelegramURL string
-	TransmissionURL       string
-	Movie, Series         AppConfig
+	Token                     string
+	Allowed                   map[int64]bool
+	StateDir, TelegramURL     string
+	TransmissionURL           string
+	Movie, Series             AppConfig
+	PreparationDir, MediaRoot string
 }
 type RequestRecord struct {
-	Kind       string `json:"kind"`
-	ItemID     int    `json:"item_id"`
-	Season     int    `json:"season"`
-	Chat       int64  `json:"chat"`
-	Label      string `json:"label"`
-	EpisodeIDs []int  `json:"episode_ids,omitempty"`
-	Notified   []int  `json:"notified,omitempty"`
-	Cancelled  bool   `json:"cancelled,omitempty"`
+	Kind        string           `json:"kind"`
+	ItemID      int              `json:"item_id"`
+	Season      int              `json:"season"`
+	Chat        int64            `json:"chat"`
+	Label       string           `json:"label"`
+	EpisodeIDs  []int            `json:"episode_ids,omitempty"`
+	Notified    []int            `json:"notified,omitempty"`
+	Cancelled   bool             `json:"cancelled,omitempty"`
+	Preparation []PreparationRef `json:"preparation,omitempty"`
 }
 type State struct {
 	Offset   int64           `json:"offset"`
@@ -442,6 +444,12 @@ func (b *Bot) add(v *Selection) error {
 	}
 	if existing != nil && v.Kind == "movie" {
 		if existing["hasFile"] != false {
+			if b.cfg.PreparationDir != "" && existing["hasFile"] == true {
+				if err := b.recordRequest(RequestRecord{Kind: v.Kind, ItemID: number(existing["id"]), Chat: v.Chat, Label: v.Label}); err != nil {
+					return err
+				}
+				return b.send(v.Chat, "Already downloaded. I’ll check it and prepare a streaming-friendly copy if needed; no new download was started.", nil)
+			}
 			return b.send(v.Chat, "Already in the library manager; monitoring and search settings were left unchanged.", nil)
 		}
 		rows, err := b.queue("movie")
@@ -514,9 +522,11 @@ func (b *Bot) add(v *Selection) error {
 			return errors.New("ARR response missing item ID")
 		}
 	}
-	b.state.Requests = append(b.state.Requests, RequestRecord{Kind: v.Kind, ItemID: id, Season: v.Season, Chat: v.Chat, Label: v.Label, EpisodeIDs: episodeIDs})
-	if err := b.save(); err != nil {
+	if err := b.recordRequest(RequestRecord{Kind: v.Kind, ItemID: id, Season: v.Season, Chat: v.Chat, Label: v.Label, EpisodeIDs: episodeIDs}); err != nil {
 		return err
+	}
+	if b.cfg.PreparationDir != "" {
+		return b.send(v.Chat, fmt.Sprintf("Requested %s. I’ll download it, check compatibility, and prepare a streaming-friendly copy if needed. Originals are kept.", v.Label), nil)
 	}
 	return b.send(v.Chat, fmt.Sprintf("Requested %s. Search queued; availability depends on your indexers. Jellyfin can see it after download and import.", v.Label), nil)
 }
@@ -537,12 +547,25 @@ func (b *Bot) handle(u Update) error {
 	}
 	var err error
 	if u.Callback != nil {
-		err = b.callback(*u.Callback)
+		if strings.HasPrefix(u.Callback.Data, "retry:") {
+			_ = b.telegram("answerCallbackQuery", map[string]any{"callback_query_id": u.Callback.ID})
+			n, _ := strconv.Atoi(strings.TrimPrefix(u.Callback.Data, "retry:"))
+			err = b.retryPreparation(chat.ID, n)
+		} else {
+			err = b.callback(*u.Callback)
+		}
 	} else if u.Message != nil && u.Message.Text != "" {
 		text := strings.TrimSpace(u.Message.Text)
 		switch {
 		case text == "/active" || text == "/downloads":
 			err = b.active(chat.ID)
+		case text == "/retry" || strings.HasPrefix(text, "/retry "):
+			parts := strings.Fields(text)
+			n := 0
+			if len(parts) == 2 {
+				n, _ = strconv.Atoi(parts[1])
+			}
+			err = b.retryPreparation(chat.ID, n)
 		case text == "/cancel" || strings.HasPrefix(text, "/cancel "):
 			err = b.confirmCancellation(chat.ID, from.ID, text)
 		default:
@@ -550,7 +573,12 @@ func (b *Bot) handle(u Update) error {
 		}
 	}
 	if err != nil {
-		_ = b.send(chat.ID, "Operation failed or only partly completed. Check Radarr/Sonarr and Transmission before retrying: a timed-out operation may have succeeded.", nil)
+		preparationAction := (u.Callback != nil && strings.HasPrefix(u.Callback.Data, "retry:")) || (u.Message != nil && strings.HasPrefix(strings.TrimSpace(u.Message.Text), "/retry"))
+		if preparationAction {
+			_ = b.send(chat.ID, "Preparation update failed or partly completed. Check /active before retrying; original media and downloads were not changed.", nil)
+		} else {
+			_ = b.send(chat.ID, "Operation failed or only partly completed. Check Radarr/Sonarr and Transmission before retrying: a timed-out operation may have succeeded.", nil)
+		}
 	}
 	return err
 }
@@ -629,7 +657,7 @@ func (b *Bot) pollHistory() error {
 		sort.Slice(fresh, func(i, j int) bool { return number(fresh[i]["id"]) < number(fresh[j]["id"]) })
 		for _, row := range fresh {
 			id := number(row["id"])
-			if row["eventType"] == "downloadFolderImported" {
+			if row["eventType"] == "downloadFolderImported" && b.cfg.PreparationDir == "" {
 				itemField := "movieId"
 				if kind == "series" {
 					itemField = "seriesId"

@@ -18,7 +18,9 @@ Requires these variables (normally `/srv/deploy/arr/bot.env`):
 
 The ARR Compose stack sets internal Radarr/Sonarr URLs, media roots, and the workstation proxy at `host.docker.internal:20171` for Telegram; it bypasses the proxy for the two ARR names. The container runs as the ARR deployment user and mounts `/srv/deploy/arr/config/bot:/state` writable. The existing `/state/offset` is retained. `/state/notifications.json` holds imported-event checkpoints, request/chat mapping and delivery dedupe. Mount it persistently and back it up; it contains chat IDs and titles, not credentials. The process logs generic errors only, never URLs or response bodies containing secrets.
 
-Build/test: `go test ./... && go vet ./...`; `CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o arr-telegram-bot .`. Publishing from `master` is handled by `.github/workflows/image.yml`. There are no ports to expose. A private GHCR package may require `docker login ghcr.io` with read:packages on the target host.
+Build/test: `go test ./... && go vet ./...`; optional real-GPU check: `ARR_TEST_NVENC=1 go test -run TestWorkerRealFFmpeg -v ./...`. FFmpeg integration tests skip when the binaries are unavailable. CI also publishes `:worker` and `:worker-SHA` from `Dockerfile.worker`. The bot remains a small scratch image; the worker image includes Ubuntu FFmpeg and uses the host NVIDIA driver through NVIDIA Container Toolkit.
+
+Build: `CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o arr-telegram-bot .`. Publishing from `master` is handled by `.github/workflows/image.yml`. There are no ports to expose. A private GHCR package may require `docker login ghcr.io` with read:packages on the target host.
 
 ## Behavior
 
@@ -60,5 +62,72 @@ Checks use mock ARR, Telegram and Transmission servers; no real downloads or liv
 service integration is exercised by the unit tests. Publish the updated bot image
 before pulling/recreating the bot in the Ansible stack; this checkout alone does
 not change a running container.
+
+## Automatic streaming preparation (opt-in)
+
+Set bot `PREPARATION_DIR=/preparation` to enable; leaving it empty retains the
+original behavior. Mount original media read-only at `/downloads` and share a
+persistent `/preparation` directory with the worker, using the same UID/GID.
+The worker runs the same binary with `--worker`, needs `JELLYFIN_URL` and an admin
+`JELLYFIN_API_KEY`, and writes a separate `/optimized` media mount. It needs no
+Telegram or ARR credentials. Run exactly one worker; a filesystem lock enforces
+this on a single host. Do not run worker and bot on separate machines against a
+network filesystem without revisiting locking/publication guarantees.
+
+- Only tracked, non-cancelled Telegram movie/season requests are inspected. This
+  includes previous saved requests when the feature is enabled, existing imported
+  files requested again, and subsequent upgrades of those requested titles.
+- Existing downloaded movie requests do not search again or change ARR monitoring.
+- Inspection chooses **video copy/remux**, **audio-only conversion**, or **NVENC
+  video encoding**. Stream-copy does not modify originals; it creates a new MP4.
+- Initial target: SDR, H.264 8-bit, up to 1920×1080 without upscaling. Video encoding
+  targets 12 Mbps, maxrate 16 Mbps, a 32 Mbit VBV buffer. Skip encoding only when the
+  source averages at most 15 Mbps and five-second packet windows stay at most
+  18 Mbps (audio included). The final output is checked against the same budget.
+  This is a buffered-player heuristic, not a guarantee against subsecond peaks.
+- Keep one default audio track (otherwise the first); copy compatible AAC-LC
+  mono/stereo or convert to 192 kbps AAC stereo. Alternate/surround audio remains
+  available in the original library. Multi-language optimized audio is not yet supported.
+- Copy external SRT and extract embedded SubRip/mov_text with language labels.
+  Later Bazarr SRT additions/changes are mirrored without re-encoding. Image/styled
+  subtitles stay in originals; ready/status messages warn about this. No burn-in,
+  OCR, ASS styling conversion, or automatic HDR tone mapping. HDR is **blocked**.
+- One job at a time; queue/results survive restart. Interrupted jobs restart rather
+  than trying to resume a partially encoded MP4. Sources are fingerprinted using
+  path/size/mtime; this assumes immutable ARR imports.
+- Staging is outside `films`/`shows`; validated output replaces the final file
+  atomically. Full decode and bitrate checks precede publication. Free-space checks
+  reserve the output budget plus 1 GiB. An upgrade never deletes the old good video
+  before a new one validates. Subtitles are staged too; the sidecar set is published
+  file-by-file before index refresh, not atomically with the video. Old-version
+  subtitle sidecars are removed on successful replacement. Treat optimized folders
+  as worker-owned (manual subtitle edits there can be replaced). Originals/hardlinks/
+  seeding files are never written.
+- Jobs are deduplicated across chats, and newer versions supersede older pending
+  jobs for the same output. `/cancel` retains its existing shared ARR semantics and
+  also cancels preparation no active requester still needs; published copies remain.
+- `/active` includes queued/checking/preparing/progress/validating/indexing/failure
+  states, hiding fully downloaded and ready requests. `/retry NUMBER` or the Retry
+  button retries failed/blocked preparation without downloading again. Ownership
+  is checked, and a retry applies to the shared physical job.
+- Ready notifications require Jellyfin indexing, not just ARR import. Season-pack
+  updates are batched per poll; duplicate Telegram delivery remains possible if the
+  process crashes after Telegram accepts a send but before its checkpoint is saved.
+  If indexing alone failed, retry reuses the already published video.
+
+Create Jellyfin **Streaming Films** and **Streaming Shows** libraries pointing to
+`/optimized/films` and `/optimized/shows`, respectively; the paths must match the
+worker's output mount. Enable user access and real-time monitoring. The worker
+checks the matching library exists before encoding and refreshes/index-verifies
+published video by path and indexed file size. It does not automatically create
+libraries or alter users.
+
+Back up `notifications.json` and the queue's `requests/`, `results/`, and `cancel/`
+together. JSON state includes media paths/titles/chat IDs, not API keys. Queue files
+are retained for restart/deduplication; per-tick queue scans become quadratic with
+large histories, so introduce an output-key index/retention before thousands of jobs.
+The worker polls every 30 seconds when idle; status discovery remains tied to
+Telegram polling. Verify Direct Play and real two-client SyncPlay on target clients
+before assuming all codecs/subtitles/buffering conditions are covered.
 
 Notifications are polled after each Telegram long poll (normally 25 seconds). History reads page through up to 100 pages of 100 records; an excessive backlog results in a retry/error, not silent skipping. On first startup, ARR history must be reachable before accepting requests. The service must have permission to create files in `/state`.
