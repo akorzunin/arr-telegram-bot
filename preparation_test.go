@@ -323,7 +323,7 @@ func TestJellyfinIndexPaginationAndAPIKey(t *testing.T) {
 	mediaFile(t, filepath.Join(output, "films/Test/Test.mp4"))
 	calls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("X-Emby-Token") != "secret" {
+		if r.Header.Get("Authorization") != `MediaBrowser Token="secret"` {
 			t.Error("API key missing")
 		}
 		if r.URL.Path == "/Library/Refresh" {
@@ -429,6 +429,9 @@ func TestWorkerRealFFmpeg(t *testing.T) {
 				t.Fatal(err)
 			}
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("Authorization") != `MediaBrowser Token="secret"` {
+					t.Error("standard Jellyfin Authorization header missing")
+				}
 				if r.URL.Path == "/Library/VirtualFolders" {
 					_ = json.NewEncoder(w).Encode([]map[string]any{{"Locations": []string{"/optimized/films"}}})
 					return

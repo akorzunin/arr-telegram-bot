@@ -613,7 +613,7 @@ func (w *Worker) jf(ctx context.Context, method, path string, out any) error {
 	if err != nil {
 		return err
 	}
-	req.Header.Set("X-Emby-Token", w.JellyfinKey)
+	req.Header.Set("Authorization", "MediaBrowser Token="+strconv.Quote(w.JellyfinKey))
 	response, err := w.Client.Do(req)
 	if err != nil {
 		return errors.New("Jellyfin unavailable")
