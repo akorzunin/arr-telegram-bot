@@ -197,7 +197,9 @@ func encodeArgs(source, output string, video MediaStream, audio *MediaStream, co
 	} else {
 		// CPU decode/scale is intentionally used for SDR only; CUDA scaling can replace
 		// it if CPU usage becomes limiting. NVIDIA still performs the costly encoding.
-		args = append(args, "-vf", "scale=w='min(1920,iw)':h='min(1080,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,format=yuv420p", "-c:v", "h264_nvenc", "-preset", "p6", "-b:v", "12M", "-maxrate", "16M", "-bufsize", "32M")
+		// A one-second 14 Mbps VBV leaves headroom for audio and bursts under
+		// the validator's 18 Mbps five-second rolling limit.
+		args = append(args, "-vf", "scale=w='min(1920,iw)':h='min(1080,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,format=yuv420p", "-c:v", "h264_nvenc", "-preset", "p6", "-b:v", "12M", "-maxrate", "14M", "-bufsize", "14M")
 	}
 	if audio != nil {
 		if compatibleAudio(audio) && (copyVideo || audio.BitRate != "") {
@@ -290,7 +292,7 @@ func (w *Worker) runFFmpeg(ctx context.Context, job PrepareJob, args []string, d
 func validateOutput(ctx context.Context, path string, original float64) error {
 	probe, err := probeMedia(ctx, path)
 	if err != nil {
-		return err
+		return errors.New("output inspection failed")
 	}
 	duration, err := probeDuration(probe)
 	if err != nil {
@@ -300,15 +302,24 @@ func validateOutput(ctx context.Context, path string, original float64) error {
 	if err != nil {
 		return err
 	}
-	if !compatibleVideo(video) || hdrVideo(video) || !compatibleAudio(audio) || math.Abs(duration-original) > math.Max(.25, math.Min(2, original*.005)) {
-		return errors.New("output validation failed")
+	if !compatibleVideo(video) || hdrVideo(video) {
+		return errors.New("output video is not streaming compatible")
+	}
+	if !compatibleAudio(audio) {
+		return errors.New("output audio is not streaming compatible")
+	}
+	if math.Abs(duration-original) > math.Max(.25, math.Min(2, original*.005)) {
+		return errors.New("output duration differs from source")
 	}
 	st, err := os.Stat(path)
 	if err != nil {
-		return err
+		return errors.New("output file unavailable")
 	}
 	safe, err := safeSourceBitrate(ctx, PrepareJob{Source: path, Size: st.Size()}, duration)
-	if err != nil || !safe {
+	if err != nil {
+		return errors.New("output bitrate inspection failed")
+	}
+	if !safe {
 		return errors.New("output exceeds streaming bitrate budget")
 	}
 	// Full decode catches damaged streams before publication; expensive but offline.
@@ -456,7 +467,7 @@ func (w *Worker) process(job PrepareJob) error {
 		return err
 	}
 	if err = validateOutput(ctx, stage, duration); err != nil {
-		return fail("failed", "output validation failed")
+		return fail("failed", err.Error())
 	}
 	if err = w.stageSubtitles(ctx, job, probe, stageDir); err != nil {
 		return fail("failed", "subtitle preparation failed")

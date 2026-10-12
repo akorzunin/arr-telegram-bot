@@ -81,7 +81,7 @@ network filesystem without revisiting locking/publication guarantees.
 - Inspection chooses **video copy/remux**, **audio-only conversion**, or **NVENC
   video encoding**. Stream-copy does not modify originals; it creates a new MP4.
 - Initial target: SDR, H.264 8-bit, up to 1920×1080 without upscaling. Video encoding
-  targets 12 Mbps, maxrate 16 Mbps, a 32 Mbit VBV buffer. Skip encoding only when the
+  targets 12 Mbps, maxrate 14 Mbps, a 14 Mbit VBV buffer to leave burst/audio headroom. Skip encoding only when the
   source averages at most 15 Mbps and five-second packet windows stay at most
   18 Mbps (audio included). The final output is checked against the same budget.
   This is a buffered-player heuristic, not a guarantee against subsecond peaks.

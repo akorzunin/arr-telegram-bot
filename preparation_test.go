@@ -310,7 +310,7 @@ func TestBitrateDecisionAndEncodingArguments(t *testing.T) {
 		t.Fatal(args)
 	}
 	args = strings.Join(encodeArgs("input.mkv", "output.mp4", video, audio, false), " ")
-	if !strings.Contains(args, "h264_nvenc") || !strings.Contains(args, "min(1080,ih)") {
+	if !strings.Contains(args, "h264_nvenc") || !strings.Contains(args, "min(1080,ih)") || !strings.Contains(args, "-maxrate 14M -bufsize 14M") {
 		t.Fatal(args)
 	}
 	video.Transfer = "smpte2084"
@@ -318,6 +318,73 @@ func TestBitrateDecisionAndEncodingArguments(t *testing.T) {
 		t.Fatal("HDR not blocked")
 	}
 }
+func TestOutputValidationDetails(t *testing.T) {
+	tools := t.TempDir()
+	for name, script := range map[string]string{
+		"ffprobe": "#!/bin/sh\ncase \"$*\" in\n*-show_packets*) printf '%s' \"$TEST_PACKETS\";;\n*) printf '%s' \"$TEST_PROBE\";;\nesac\n",
+		"ffmpeg":  "#!/bin/sh\nexit \"$TEST_DECODE_EXIT\"\n",
+	} {
+		if err := os.WriteFile(filepath.Join(tools, name), []byte(script), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", tools)
+	path := filepath.Join(t.TempDir(), "private-title.mp4")
+	mediaFile(t, path)
+	for _, tc := range []struct {
+		name, packets, decodeExit, detail string
+		change                            func(*MediaProbe)
+	}{
+		{name: "compatible"},
+		{name: "video", change: func(p *MediaProbe) { p.Streams[0].Codec = "hevc" }, detail: "output video is not streaming compatible"},
+		{name: "HDR", change: func(p *MediaProbe) { p.Streams[0].Transfer = "smpte2084" }, detail: "output video is not streaming compatible"},
+		{name: "audio", change: func(p *MediaProbe) { p.Streams[1].Channels = 6 }, detail: "output audio is not streaming compatible"},
+		{name: "duration", change: func(p *MediaProbe) { p.Format.Duration = "7" }, detail: "output duration differs from source"},
+		{name: "bitrate", packets: "0,12000000\n", detail: "output exceeds streaming bitrate budget"},
+		{name: "packet inspection", packets: "N/A,100\n", detail: "output bitrate inspection failed"},
+		{name: "decode", decodeExit: "1", detail: "output decode validation failed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			probe := MediaProbe{Streams: []MediaStream{
+				{Type: "video", Codec: "h264", Pixel: "yuv420p", Width: 1920, Height: 1080},
+				{Type: "audio", Codec: "aac", Profile: "LC", Channels: 2, BitRate: "192000"},
+			}}
+			probe.Format.Duration = "10"
+			if tc.change != nil {
+				tc.change(&probe)
+			}
+			data, err := json.Marshal(probe)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("TEST_PROBE", string(data))
+			packets := tc.packets
+			if packets == "" {
+				packets = "0,10000\n1,10000\n"
+			}
+			t.Setenv("TEST_PACKETS", packets)
+			exit := tc.decodeExit
+			if exit == "" {
+				exit = "0"
+			}
+			t.Setenv("TEST_DECODE_EXIT", exit)
+			err = validateOutput(context.Background(), path, 10)
+			if tc.detail == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else if err == nil || err.Error() != tc.detail {
+				t.Fatalf("got %v, want %q", err, tc.detail)
+			}
+		})
+	}
+	// Probe failures must not expose media paths in Telegram notifications.
+	t.Setenv("TEST_PROBE", "invalid JSON containing private-title.mp4")
+	if err := validateOutput(context.Background(), path, 10); err == nil || err.Error() != "output inspection failed" {
+		t.Fatalf("unsafe inspection error: %v", err)
+	}
+}
+
 func TestJellyfinIndexPaginationAndAPIKey(t *testing.T) {
 	output := t.TempDir()
 	mediaFile(t, filepath.Join(output, "films/Test/Test.mp4"))
