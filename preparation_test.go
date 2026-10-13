@@ -576,6 +576,23 @@ func TestWorkerRealFFmpeg(t *testing.T) {
 			if !strings.Contains(string(sidecarData), "Updated") {
 				t.Fatal("late subtitle update missing")
 			}
+			// Explicit rebuild must not reuse a previously published single-audio copy.
+			job.Generation = 3
+			job.Rebuild = true
+			if err := writeJSON(filepath.Join(queue, "requests", job.ID+".json"), job); err != nil {
+				t.Fatal(err)
+			}
+			if err := worker.tick(); err != nil {
+				t.Fatal(err)
+			}
+			rebuilt, err := os.Stat(destination)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if rebuilt.ModTime().Equal(outst.ModTime()) {
+				t.Fatal("explicit rebuild skipped encoding")
+			}
+			outst = rebuilt
 			// A failed replacement must not truncate an already good published copy.
 			bin := t.TempDir()
 			if err := os.WriteFile(filepath.Join(bin, "ffmpeg"), []byte("#!/bin/sh\nexit 1\n"), 0755); err != nil {

@@ -11,6 +11,19 @@ import (
 
 func configFromEnv() (Config, error) {
 	cfg := Config{Token: strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN")), StateDir: "/state", Allowed: map[int64]bool{}, CleanupAllowed: map[int64]bool{}}
+	cfg.BazarrURL = strings.TrimRight(strings.TrimSpace(os.Getenv("BAZARR_URL")), "/")
+	cfg.BazarrKey = strings.TrimSpace(os.Getenv("BAZARR_API_KEY"))
+	for name, target := range map[string]*int{"BAZARR_EN_PROFILE_ID": &cfg.EnglishSubs, "BAZARR_RU_PROFILE_ID": &cfg.RussianSubs} {
+		value := os.Getenv(name)
+		if value == "" {
+			continue
+		}
+		id, err := strconv.Atoi(value)
+		if err != nil || id <= 0 {
+			return cfg, errors.New("invalid subtitle profile")
+		}
+		*target = id
+	}
 	cfg.PreparationDir = strings.TrimSpace(os.Getenv("PREPARATION_DIR"))
 	cfg.MediaRoot = "/downloads"
 	cfg.TransmissionURL = strings.TrimSpace(os.Getenv("TRANSMISSION_URL"))
@@ -41,11 +54,20 @@ func configFromEnv() (Config, error) {
 		if key == "" || root == "" || addr == "" || err != nil || profile <= 0 {
 			return cfg, errors.New("invalid ARR configuration")
 		}
-		app := AppConfig{Key: key, Root: root, URL: strings.TrimRight(addr, "/"), Profile: profile}
+		ru, err := strconv.Atoi(os.Getenv(kind + "_RU_PROFILE_ID"))
+		if os.Getenv(kind+"_RU_PROFILE_ID") != "" && (err != nil || ru <= 0) {
+			return cfg, errors.New("invalid Russian profile")
+		}
+		app := AppConfig{Key: key, Root: root, URL: strings.TrimRight(addr, "/"), Profile: profile, RussianProfile: ru}
 		if kind == "RADARR" {
 			cfg.Movie = app
 		} else {
 			cfg.Series = app
+		}
+	}
+	if cfg.BazarrURL != "" || cfg.BazarrKey != "" || cfg.EnglishSubs != 0 || cfg.RussianSubs != 0 || cfg.Movie.RussianProfile != 0 || cfg.Series.RussianProfile != 0 {
+		if cfg.BazarrURL == "" || cfg.BazarrKey == "" || cfg.EnglishSubs <= 0 || cfg.RussianSubs <= 0 || cfg.Movie.RussianProfile <= 0 || cfg.Series.RussianProfile <= 0 {
+			return cfg, errors.New("incomplete language configuration")
 		}
 	}
 	return cfg, nil
@@ -109,6 +131,9 @@ func main() {
 		if err := bot.pollHistory(); err != nil {
 			log.Printf("History polling failed; retrying: %v", err)
 			time.Sleep(5 * time.Second)
+		}
+		if err := bot.pollLanguages(); err != nil {
+			log.Print("Subtitle profile synchronization failed; will retry")
 		}
 		if err := bot.pollPreparation(); err != nil {
 			log.Print("Preparation discovery/status failed; will retry")

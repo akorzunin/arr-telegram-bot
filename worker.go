@@ -187,10 +187,30 @@ func safeSourceBitrate(ctx context.Context, job PrepareJob, duration float64) (b
 	}
 	return true, waitErr
 }
-func encodeArgs(source, output string, video MediaStream, audio *MediaStream, copyVideo bool) []string {
+func additionalAudio(probe MediaProbe, selected *MediaStream) []MediaStream {
+	var streams []MediaStream
+	for _, stream := range probe.Streams {
+		if stream.Type == "audio" && (selected == nil || stream.Index != selected.Index) {
+			streams = append(streams, stream)
+		}
+	}
+	return streams
+}
+func allAudioCompatible(probe MediaProbe) bool {
+	for _, stream := range probe.Streams {
+		if stream.Type == "audio" && !compatibleAudio(&stream) {
+			return false
+		}
+	}
+	return true
+}
+func encodeArgs(source, output string, video MediaStream, audio *MediaStream, copyVideo bool, additional ...MediaStream) []string {
 	args := []string{"-hide_banner", "-loglevel", "error", "-xerror", "-nostdin", "-y", "-i", source, "-map", fmt.Sprintf("0:%d", video.Index), "-map_metadata", "0"}
 	if audio != nil {
 		args = append(args, "-map", fmt.Sprintf("0:%d", audio.Index))
+	}
+	for _, stream := range additional {
+		args = append(args, "-map", fmt.Sprintf("0:%d", stream.Index))
 	}
 	if copyVideo {
 		args = append(args, "-c:v", "copy")
@@ -206,6 +226,32 @@ func encodeArgs(source, output string, video MediaStream, audio *MediaStream, co
 			args = append(args, "-c:a", "copy")
 		} else {
 			args = append(args, "-c:a", "aac", "-b:a", "192k", "-ac", "2")
+		}
+	}
+	streams := append([]MediaStream{}, additional...)
+	if audio != nil {
+		streams = append([]MediaStream{*audio}, streams...)
+	}
+	// Keep every audio track rather than guessing the original language from tags.
+	// Very large track sets can exceed the 18 Mbps budget; select languages if that becomes common.
+	for i, stream := range streams {
+		suffix := fmt.Sprintf(":a:%d", i)
+		if i > 0 {
+			if compatibleAudio(&stream) && (copyVideo || stream.BitRate != "") {
+				args = append(args, "-c"+suffix, "copy")
+			} else {
+				args = append(args, "-c"+suffix, "aac", "-b"+suffix, "192k", "-ac"+suffix, "2")
+			}
+		}
+		disposition := "0"
+		if i == 0 {
+			disposition = "default"
+		}
+		args = append(args, "-disposition"+suffix, disposition)
+		for _, tag := range []string{"language", "title"} {
+			if value := stream.Tags[tag]; value != "" {
+				args = append(args, "-metadata:s"+suffix, tag+"="+value)
+			}
 		}
 	}
 	return append(args, "-sn", "-movflags", "+faststart", "-progress", "pipe:1", "-nostats", output)
@@ -298,14 +344,14 @@ func validateOutput(ctx context.Context, path string, original float64) error {
 	if err != nil {
 		return err
 	}
-	video, audio, err := selectedStreams(probe)
+	video, _, err := selectedStreams(probe)
 	if err != nil {
 		return err
 	}
 	if !compatibleVideo(video) || hdrVideo(video) {
 		return errors.New("output video is not streaming compatible")
 	}
-	if !compatibleAudio(audio) {
+	if !allAudioCompatible(probe) {
 		return errors.New("output audio is not streaming compatible")
 	}
 	if math.Abs(duration-original) > math.Max(.25, math.Min(2, original*.005)) {
@@ -334,6 +380,9 @@ func (w *Worker) process(job PrepareJob) error {
 	var prior PrepareResult
 	_ = readJSON(filepath.Join(w.Queue, "results", job.ID+".json"), &prior)
 	result := PrepareResult{State: "checking", Published: prior.Published, Action: prior.Action}
+	if job.Rebuild && prior.Generation != job.Generation {
+		result.Published = false
+	}
 	if err := w.saveResult(job, result); err != nil {
 		return err
 	}
@@ -403,6 +452,13 @@ func (w *Worker) process(job PrepareJob) error {
 		return fail("blocked", "HDR tone mapping is not supported yet")
 	}
 	for _, stream := range probe.Streams {
+		if stream.Type == "audio" {
+			language := strings.ToLower(stream.Tags["language"])
+			if language == "" {
+				language = "und"
+			}
+			result.AudioLanguages = append(result.AudioLanguages, language)
+		}
 		if stream.Type == "subtitle" && stream.Codec != "subrip" && stream.Codec != "mov_text" {
 			result.Warning = "Image/styled subtitles remain in originals; choose external SRT for streaming."
 		}
@@ -441,7 +497,7 @@ func (w *Worker) process(job PrepareJob) error {
 	result.Action = "encode"
 	if copyVideo {
 		result.Action = "remux"
-		if !compatibleAudio(audio) {
+		if !allAudioCompatible(probe) {
 			result.Action = "audio-only"
 		}
 	}
@@ -455,7 +511,7 @@ func (w *Worker) process(job PrepareJob) error {
 	if err = w.saveResult(job, result); err != nil {
 		return err
 	}
-	if err = w.runFFmpeg(ctx, job, encodeArgs(job.Source, stage, video, audio, copyVideo), duration, &result); err != nil {
+	if err = w.runFFmpeg(ctx, job, encodeArgs(job.Source, stage, video, audio, copyVideo, additionalAudio(probe, audio)...), duration, &result); err != nil {
 		if w.cancelled(job) || w.superseded(job) {
 			return fail("cancelled", "preparation cancelled or superseded")
 		}

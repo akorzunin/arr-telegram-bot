@@ -12,7 +12,10 @@ Requires these variables (normally `/srv/deploy/arr/bot.env`):
 | `TELEGRAM_ALLOWED_USERS` | Comma-separated Telegram numeric user IDs; empty preserves Python behavior and allows any private chat |
 | `TELEGRAM_CLEANUP_USERS` | Comma-separated IDs allowed to permanently delete media; defaults to `TELEGRAM_ALLOWED_USERS`, and deletion is disabled if both are empty. Does not restrict download requests or `/list`. |
 | `RADARR_API_KEY`, `SONARR_API_KEY` | ARR API credentials |
-| `RADARR_QUALITY_PROFILE_ID`, `SONARR_QUALITY_PROFILE_ID` | Positive numeric profile IDs |
+| `RADARR_QUALITY_PROFILE_ID`, `SONARR_QUALITY_PROFILE_ID` | Positive numeric default/original-preferred profile IDs |
+| `RADARR_RU_PROFILE_ID`, `SONARR_RU_PROFILE_ID` | Russian-required quality profiles; enable together with all Bazarr settings below |
+| `BAZARR_URL`, `BAZARR_API_KEY` | Bazarr connection (e.g. `http://bazarr:6767`); optional language feature, all settings required together |
+| `BAZARR_EN_PROFILE_ID`, `BAZARR_RU_PROFILE_ID` | Bazarr English/Russian subtitle profile IDs |
 | `RADARR_URL`, `SONARR_URL` | Internal ARR URLs (compose overrides to `http://radarr:7878`, `http://sonarr:8989`) |
 | `RADARR_ROOT`, `SONARR_ROOT` | Root folder paths inside ARR |
 | `TRANSMISSION_URL` | RPC endpoint for file-preserving cancellation; defaults to `http://host.docker.internal:9092/transmission/rpc` |
@@ -25,7 +28,37 @@ Build: `CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o arr-telegram-bot .`
 
 ## Behavior
 
-Send a plain title to search both apps, `/movie TITLE`, or `/series TITLE S02` (also `season 2`). At most five results per app; select, then confirm within 15 minutes. A series defaults to season 1. A new movie searches immediately. A confirmed re-request of an existing movie with no file and no active/pending ARR queue entry re-enables monitoring and runs `MoviesSearch`, preserving its profile and path. Movies with files or active queue entries are left unchanged. A new series monitors only the requested season; an existing series monitors the requested season and its episodes, and queues `SeasonSearch`. The bot checks history `downloadFolderImported` events; it sends a chat notification only for tracked request IDs and requested episode selections. For a new series, the episode's season is checked via Sonarr before notifying. A startup history high-water mark prevents old imports from being attributed to later requests. An unsuccessful Telegram send leaves the checkpoint behind for a later retry (successful sends can still duplicate if the process crashes between Telegram acceptance and durable checkpoint). An update offset is written before handling each update, as in the Python bot: crashes can drop an unhandled request but cannot replay an add.
+Send a plain title to search both apps, `/movie TITLE`, or `/series TITLE S02` (also `season 2`). At most five results per app; select, then confirm within 15 minutes. A series defaults to season 1. A new movie searches immediately. A confirmed re-request of an existing movie with no file and no active/pending ARR queue entry re-enables monitoring and runs `MoviesSearch`, preserving its profile and path. With language support disabled, movies with files or active queue entries are left unchanged. With language support enabled, downloaded titles enter the confirmed language-management flow; active downloads are not duplicated. A new series monitors only the requested season; an existing series monitors the requested season and its episodes, and queues `SeasonSearch`. The bot checks history `downloadFolderImported` events; it sends a chat notification only for tracked request IDs and requested episode selections. For a new series, the episode's season is checked via Sonarr before notifying. A startup history high-water mark prevents old imports from being attributed to later requests. An unsuccessful Telegram send leaves the checkpoint behind for a later retry (successful sends can still duplicate if the process crashes between Telegram acceptance and durable checkpoint). An update offset is written before handling each update, as in the Python bot: crashes can drop an unhandled request but cannot replay an add.
+
+### Language profiles and extra tracks
+
+With the optional language configuration enabled, confirmation offers **Original + EN**
+(default), **Russian + RU**, and **Original + RU subs**. Original audio is a preference,
+not a guarantee. The managed Russian profile requires a Russian custom-format score
+of 10000; original audio adds 100 to prefer releases containing both. Release metadata
+can be wrong; worker-ready notifications warn when requested Russian audio is missing
+or unverified. Streaming readiness does not guarantee subtitle availability.
+
+Use `/language TITLE` (or `/language TITLE S02`) for downloaded titles:
+
+- Inspect ARR's reported audio language tags; missing tags mean unknown, not absence.
+- Apply a language profile after confirmation. Missing/unverified Russian audio needs
+  a separate **replacement-search confirmation**, with no profile changes before it.
+- **Fetch EN/RU subtitles** searches Bazarr without changing profiles or downloading
+  another video. Existing tracks/sidecars are kept. Searches can find nothing;
+  check Bazarr for results. New SRTs are mirrored to tracked streaming copies.
+- **Rebuild streaming audio** regenerates old single-audio optimized copies with all
+  source audio tracks. Existing optimized files stay until a replacement validates.
+- ARR cannot fetch standalone dubbing. A confirmed replacement search keeps current
+  originals until ARR imports an accepted upgrade; it does not force a downgrade or
+  guarantee an eligible release.
+
+ARR/Bazarr profiles are **whole-title settings**, including the **whole series**;
+changing them can enable automatic upgrades of other monitored seasons. Extra subtitle
+searches and explicit `SeasonSearch` target the selected season. The latest saved title
+preference wins across requesters/seasons. Subtitle profile assignment waits for Bazarr
+synchronization and retries durably; legacy requests without preferences are unchanged.
+Browsing shows at most 20 matches; narrow the title to find additional entries.
 
 ### Download controls
 
@@ -144,9 +177,11 @@ network filesystem without revisiting locking/publication guarantees.
   source averages at most 15 Mbps and five-second packet windows stay at most
   18 Mbps (audio included). The final output is checked against the same budget.
   This is a buffered-player heuristic, not a guarantee against subsecond peaks.
-- Keep one default audio track (otherwise the first); copy compatible AAC-LC
-  mono/stereo or convert to 192 kbps AAC stereo. Alternate/surround audio remains
-  available in the original library. Multi-language optimized audio is not yet supported.
+- Keep **all audio tracks**, with the source default track first (otherwise the first).
+  Preserve language/title tags and one default disposition. Copy compatible AAC-LC
+  mono/stereo or convert each track to 192 kbps AAC stereo. Surround originals remain
+  available in the original library. Very large audio track sets can exceed the
+  streaming bitrate budget and fail validation; no tracks are silently discarded.
 - Copy external SRT and extract embedded SubRip/mov_text with language labels.
   Later Bazarr SRT additions/changes are mirrored without re-encoding. Image/styled
   subtitles stay in originals; ready/status messages warn about this. No burn-in,

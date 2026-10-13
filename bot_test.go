@@ -35,6 +35,10 @@ type rig struct {
 	movieDetail     map[string]any
 	seriesDetail    map[string]any
 	episodeFiles    map[int]map[string]any
+	bazarrSynced    bool
+	bazarrBodies    []map[string]any
+	bazarrFail      bool
+	bazarrRows      []map[string]any
 }
 
 func setup(t *testing.T) *rig {
@@ -133,6 +137,40 @@ func (r *rig) serve(w http.ResponseWriter, q *http.Request) {
 			return
 		}
 		reply = map[string]any{"result": "success"}
+	case strings.HasPrefix(path, "/api/") && !strings.HasPrefix(path, "/api/v3/"):
+		if q.Header.Get("X-Api-Key") != "bazarr-secret" {
+			r.t.Error("missing Bazarr auth")
+		}
+		if r.bazarrFail {
+			w.WriteHeader(500)
+			return
+		}
+		if q.Method == "GET" {
+			rows := []map[string]any{}
+			if r.bazarrSynced {
+				rows = append(rows, map[string]any{"radarrId": 81, "sonarrSeriesId": 91})
+				if path == "/api/episodes" {
+					rows = nil
+					for _, ep := range r.episodes {
+						rows = append(rows, map[string]any{"sonarrEpisodeId": ep["id"]})
+					}
+				}
+				if r.bazarrRows != nil {
+					rows = r.bazarrRows
+				}
+			}
+			reply = map[string]any{"data": rows}
+		} else {
+			r.bazarrBodies = append(r.bazarrBodies, body)
+			w.WriteHeader(204)
+			return
+		}
+	case path == "/api/v3/episodefile":
+		files := []map[string]any{}
+		for _, file := range r.episodeFiles {
+			files = append(files, file)
+		}
+		reply = files
 	case strings.HasPrefix(path, "/api/v3/episodefile/"):
 		id, _ := strconv.Atoi(strings.TrimPrefix(path, "/api/v3/episodefile/"))
 		reply = r.episodeFiles[id]

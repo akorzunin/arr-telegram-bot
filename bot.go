@@ -22,6 +22,7 @@ import (
 type AppConfig struct {
 	URL, Key, Root string
 	Profile        int
+	RussianProfile int
 }
 type Config struct {
 	Token                     string
@@ -30,17 +31,22 @@ type Config struct {
 	TransmissionURL           string
 	Movie, Series             AppConfig
 	PreparationDir, MediaRoot string
+	BazarrURL, BazarrKey      string
+	EnglishSubs, RussianSubs  int
 }
 type RequestRecord struct {
-	Kind        string           `json:"kind"`
-	ItemID      int              `json:"item_id"`
-	Season      int              `json:"season"`
-	Chat        int64            `json:"chat"`
-	Label       string           `json:"label"`
-	EpisodeIDs  []int            `json:"episode_ids,omitempty"`
-	Notified    []int            `json:"notified,omitempty"`
-	Cancelled   bool             `json:"cancelled,omitempty"`
-	Preparation []PreparationRef `json:"preparation,omitempty"`
+	Kind            string           `json:"kind"`
+	ItemID          int              `json:"item_id"`
+	Season          int              `json:"season"`
+	Chat            int64            `json:"chat"`
+	Label           string           `json:"label"`
+	EpisodeIDs      []int            `json:"episode_ids,omitempty"`
+	Notified        []int            `json:"notified,omitempty"`
+	Cancelled       bool             `json:"cancelled,omitempty"`
+	Language        string           `json:"language,omitempty"`
+	SubsApplied     bool             `json:"subs_applied,omitempty"`
+	LanguageChanged int64            `json:"language_changed,omitempty"`
+	Preparation     []PreparationRef `json:"preparation,omitempty"`
 }
 type State struct {
 	Offset   int64           `json:"offset"`
@@ -56,6 +62,9 @@ type Selection struct {
 	Label         string
 	Season        int
 	Confirmed     bool
+	Language      string
+	Library       bool
+	Replace       bool
 	RequestNumber int // One-based persistent request index for cancellation confirmation.
 	Cleanup       *CleanupPlan
 	CleanupList   []CleanupScope
@@ -269,7 +278,7 @@ func (b *Bot) search(chat, user int64, text string) error {
 		kind = "series"
 	}
 	if text == "" || strings.HasPrefix(text, "/") {
-		return b.send(chat, "Send a title, /movie TITLE, or /series TITLE S02. Series default to season 1; only the requested season is monitored. Choose a match, then confirm. /active lists your downloads; /cancel NUMBER cancels a request after confirmation, keeping files. /list lists downloaded movies/seasons oldest first; /cleanup TITLE permanently deletes files, torrent data and optimized copies after confirmation. Plot descriptions are not supported yet.", nil)
+		return b.send(chat, "Send a title, /movie TITLE, or /series TITLE S02. Series default to season 1; only the requested season is monitored. Choose a match, then confirm. /active lists your downloads; /cancel NUMBER cancels a request after confirmation, keeping files. /language TITLE manages audio/subtitles for downloaded titles; /list lists downloaded movies/seasons oldest first; /cleanup TITLE permanently deletes files, torrent data and optimized copies after confirmation. Plot descriptions are not supported yet.", nil)
 	}
 	if len(text) > 200 {
 		return b.send(chat, "Please use a title of at most 200 characters.", nil)
@@ -388,6 +397,16 @@ func (b *Bot) callback(q Callback) error {
 	if err := b.telegram("answerCallbackQuery", map[string]any{"callback_query_id": q.ID}); err != nil {
 		return err
 	}
+	if v.Library {
+		return b.languageCallback(action, key, v)
+	}
+	if strings.HasPrefix(action, "lang-") {
+		if !v.Confirmed || !validLanguage(strings.TrimPrefix(action, "lang-")) {
+			return nil
+		}
+		v.Language = strings.TrimPrefix(action, "lang-")
+		return b.confirmLanguageRequest(key, v)
+	}
 	if v.Cleanup != nil || v.CleanupList != nil {
 		return b.cleanupCallback(action, key, v)
 	}
@@ -420,6 +439,9 @@ func (b *Bot) callback(q Callback) error {
 		if v.Kind == "series" {
 			scope = fmt.Sprintf("Season %d only. Previously requested seasons are left unchanged.", v.Season)
 		}
+		if b.languagesEnabled() {
+			return b.confirmLanguageRequest(key, v)
+		}
 		return b.send(chat, fmt.Sprintf("Request %s?\n%s\nUses the configured quality/language profile.", v.Label, scope), [][]map[string]string{{{"text": "Confirm request", "callback_data": "add:" + key}, {"text": "Cancel", "callback_data": "cancel:" + key}}})
 	case "add":
 		if v.Confirmed {
@@ -451,6 +473,31 @@ func (b *Bot) add(v *Selection) error {
 	}
 	if existing != nil && b.cleanupPending(v.Kind, number(existing["id"]), v.Season) {
 		return b.send(v.Chat, "Cleanup is still pending in the worker. Wait for /list to report completion before requesting this title again.", nil)
+	}
+	if existing != nil && b.languagesEnabled() {
+		v.Item = existing
+		downloaded := v.Kind == "movie" && existing["hasFile"] == true
+		if v.Kind == "series" {
+			var files []map[string]any
+			if err := b.arr("series", fmt.Sprintf("/episodefile?seriesId=%d", number(existing["id"])), nil, "", &files); err != nil {
+				return err
+			}
+			for _, file := range files {
+				if number(file["seasonNumber"]) == v.Season {
+					downloaded = true
+				}
+			}
+		}
+		if downloaded {
+			v.Library = true
+			key, err := cleanupToken()
+			if err != nil {
+				return err
+			}
+			b.pending[key] = v
+			return b.applyLibraryLanguage(key, v)
+		}
+		existing["qualityProfileId"] = b.languageProfile(v.Kind, v.Language)
 	}
 	if existing != nil && v.Kind == "movie" {
 		if existing["hasFile"] != false {
@@ -519,7 +566,9 @@ func (b *Bot) add(v *Selection) error {
 			}
 		}
 	} else {
-		p, err := buildPayload(v.Kind, v.Item, b.app(v.Kind), v.Season)
+		app := b.app(v.Kind)
+		app.Profile = b.languageProfile(v.Kind, v.Language)
+		p, err := buildPayload(v.Kind, v.Item, app, v.Season)
 		if err != nil {
 			return err
 		}
@@ -532,7 +581,7 @@ func (b *Bot) add(v *Selection) error {
 			return errors.New("ARR response missing item ID")
 		}
 	}
-	if err := b.recordRequest(RequestRecord{Kind: v.Kind, ItemID: id, Season: v.Season, Chat: v.Chat, Label: v.Label, EpisodeIDs: episodeIDs}); err != nil {
+	if err := b.recordRequest(RequestRecord{Kind: v.Kind, ItemID: id, Season: v.Season, Chat: v.Chat, Label: v.Label, EpisodeIDs: episodeIDs, Language: languageDefault(v.Language)}); err != nil {
 		return err
 	}
 	if b.cfg.PreparationDir != "" {
@@ -567,6 +616,8 @@ func (b *Bot) handle(u Update) error {
 	} else if u.Message != nil && u.Message.Text != "" {
 		text := strings.TrimSpace(u.Message.Text)
 		switch {
+		case text == "/language" || strings.HasPrefix(text, "/language "):
+			err = b.browseLanguages(chat.ID, from.ID, strings.TrimSpace(strings.TrimPrefix(text, "/language")))
 		case text == "/list" || text == "/cleanup" || strings.HasPrefix(text, "/cleanup "):
 			err = b.browseCleanup(chat.ID, from.ID, strings.TrimSpace(strings.TrimPrefix(text, "/cleanup")))
 		case text == "/active" || text == "/downloads":

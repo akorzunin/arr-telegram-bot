@@ -23,15 +23,17 @@ type PrepareJob struct {
 	Modified   int64  `json:"modified"`
 	Created    int64  `json:"created"`
 	Generation int64  `json:"generation"`
+	Rebuild    bool   `json:"rebuild,omitempty"`
 }
 type PrepareResult struct {
-	Generation int64  `json:"generation"`
-	State      string `json:"state"`
-	Action     string `json:"action,omitempty"`
-	Progress   int    `json:"progress,omitempty"`
-	Detail     string `json:"detail,omitempty"`
-	Published  bool   `json:"published,omitempty"`
-	Warning    string `json:"warning,omitempty"`
+	Generation     int64    `json:"generation"`
+	State          string   `json:"state"`
+	Action         string   `json:"action,omitempty"`
+	Progress       int      `json:"progress,omitempty"`
+	Detail         string   `json:"detail,omitempty"`
+	Published      bool     `json:"published,omitempty"`
+	Warning        string   `json:"warning,omitempty"`
+	AudioLanguages []string `json:"audio_languages,omitempty"`
 }
 type PreparationRef struct {
 	ID         string `json:"id"`
@@ -97,10 +99,15 @@ func sourceUnchanged(job PrepareJob, root string) bool {
 	return err == nil && st.Mode().IsRegular() && st.Size() == job.Size && st.ModTime().UnixNano() == job.Modified
 }
 func (b *Bot) recordRequest(record RequestRecord) error {
+	if b.languagesEnabled() && record.Language != "" {
+		return b.recordLanguageRequest(record)
+	}
 	if b.cfg.PreparationDir != "" {
 		for i, existing := range b.state.Requests {
 			if !existing.Cancelled && existing.Kind == record.Kind && existing.ItemID == record.ItemID && existing.Season == record.Season && existing.Chat == record.Chat {
-				b.state.Requests[i].EpisodeIDs = record.EpisodeIDs
+				if len(record.EpisodeIDs) > 0 {
+					b.state.Requests[i].EpisodeIDs = record.EpisodeIDs
+				}
 				return b.save()
 			}
 		}
@@ -302,6 +309,9 @@ func (b *Bot) pollPreparation() error {
 			if result.Warning != "" {
 				line += " " + result.Warning
 			}
+			if result.State == "ready" && b.state.Requests[i].Language == "russian" && !strings.Contains("/"+strings.Join(result.AudioLanguages, "/")+"/", "/rus/") && !strings.Contains("/"+strings.Join(result.AudioLanguages, "/")+"/", "/ru/") {
+				line += " Russian audio is missing or unverified; use /language TITLE for a confirmed replacement search."
+			}
 			if result.State != "ready" {
 				line = ref.Label + ": original available; preparation needs attention (" + result.Detail + ")."
 				needsRetry = true
@@ -354,6 +364,29 @@ func (b *Bot) pollPreparation() error {
 	}
 	return firstErr
 }
+func (b *Bot) forcePreparation(index int) error {
+	for _, ref := range b.state.Requests[index].Preparation {
+		var job PrepareJob
+		if err := readJSON(filepath.Join(b.cfg.PreparationDir, "requests", ref.ID+".json"), &job); err != nil {
+			return err
+		}
+		job.Generation = time.Now().UnixNano()
+		job.Rebuild = true
+		if err := writeJSON(filepath.Join(b.cfg.PreparationDir, "requests", ref.ID+".json"), job); err != nil {
+			return err
+		}
+		for ri := range b.state.Requests {
+			for rj := range b.state.Requests[ri].Preparation {
+				other := &b.state.Requests[ri].Preparation[rj]
+				if other.ID == ref.ID {
+					other.Generation = job.Generation
+					other.Notified = false
+				}
+			}
+		}
+	}
+	return b.save()
+}
 func (b *Bot) retryPreparation(chat int64, n int) error {
 	if b.cfg.PreparationDir == "" || n < 1 || n > len(b.state.Requests) || b.state.Requests[n-1].Chat != chat || b.state.Requests[n-1].Cancelled {
 		return b.send(chat, "Use /active, then /retry NUMBER for your request.", nil)
@@ -371,6 +404,7 @@ func (b *Bot) retryPreparation(chat int64, n int) error {
 			return err
 		}
 		job.Generation = time.Now().UnixNano()
+		job.Rebuild = false // A retry may only need indexing; explicit rebuilds set this separately.
 		if err := writeJSON(filepath.Join(b.cfg.PreparationDir, "requests", ref.ID+".json"), job); err != nil {
 			return err
 		}
