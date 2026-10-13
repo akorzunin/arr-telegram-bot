@@ -50,6 +50,35 @@ func queueMatches(req RequestRecord, row map[string]any) (bool, error) {
 	return false, errors.New("cannot identify queue season; inspect Sonarr")
 }
 
+// Completion in the download client is not completion of ARR import.
+func queueDetails(row map[string]any) string {
+	var details []string
+	if row["trackedDownloadState"] == "importPending" || (row["status"] == "completed" && row["trackedDownloadState"] != "imported") {
+		details = append(details, "downloaded; awaiting ARR import")
+	}
+	seen := map[string]bool{}
+	for _, status := range maps(row["statusMessages"]) {
+		messages, _ := status["messages"].([]any)
+		for _, value := range messages {
+			message, _ := value.(string)
+			message = strings.TrimSpace(message)
+			if message != "" && !seen[message] {
+				seen[message] = true
+				details = append(details, message)
+			}
+		}
+	}
+	return strings.Join(details, " · ")
+}
+
+func replacementBlockedMessage(row map[string]any) string {
+	text := "Already has an active/pending download. Check /active before requesting a replacement."
+	if details := queueDetails(row); details != "" {
+		text += "\n" + details + ". Resolve import warnings in ARR; another replacement search will not fix a blocked import."
+	}
+	return text
+}
+
 func (b *Bot) active(chat int64) error {
 	queues := map[string][]map[string]any{}
 	var output []string
@@ -68,6 +97,7 @@ func (b *Bot) active(chat int64) error {
 			queues[req.Kind] = rows
 		}
 		lines := []string{}
+		queued := false
 		seen := map[string]bool{}
 		for _, row := range rows {
 			matches, err := queueMatches(req, row)
@@ -77,6 +107,7 @@ func (b *Bot) active(chat int64) error {
 			if !matches {
 				continue
 			}
+			queued = true
 			if hash, ok := row["downloadId"].(string); ok && hash != "" {
 				hash = strings.ToLower(hash)
 				if seen[hash] {
@@ -90,7 +121,11 @@ func (b *Bot) active(chat int64) error {
 					progress = fmt.Sprintf(" %.0f%%", 100*(size-left)/size)
 				}
 			}
-			lines = append(lines, fmt.Sprintf("%s — %s%s", row["title"], row["status"], progress))
+			line := fmt.Sprintf("%s — %s%s", row["title"], row["status"], progress)
+			if details := queueDetails(row); details != "" {
+				line += " · " + details
+			}
+			lines = append(lines, line)
 		}
 		if len(lines) == 0 {
 			complete, err := b.requestComplete(req)
@@ -122,6 +157,9 @@ func (b *Bot) active(chat int64) error {
 		for _, ref := range req.Preparation {
 			result := b.preparationResult(ref)
 			status := result.State
+			if result.State == "ready" && queued {
+				status += " (existing streaming copy; pending downloads are not reflected here)"
+			}
 			if result.State == "preparing" {
 				status = fmt.Sprintf("%s · %d%%", result.Action, result.Progress)
 			}

@@ -58,6 +58,10 @@ Use `/language TITLE` (or `/language TITLE S02`) for downloaded titles:
   title matching, blocklists and every other rejection remain enforced. External
   dubbing, subtitle-only tags and unknown rejection messages do not qualify.
   A search with no safe candidate reports **no download**, not merely "queued".
+  `/active` distinguishes download completion from ARR import and displays import
+  warnings. A ready existing streaming copy does not mean a pending replacement
+  has imported. If ARR cannot parse a downloaded filename (for example, no year),
+  resolve its import warning instead of requesting another download.
 
 ARR/Bazarr profiles are **whole-title settings**, including the **whole series**;
 changing them can enable automatic upgrades of other monitored seasons. Extra subtitle

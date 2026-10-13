@@ -74,7 +74,7 @@ func (b *Bot) russianReplacement(v *Selection) (string, error) {
 		}
 		for _, row := range rows {
 			if number(row[idKey]) == id {
-				return "Already has an active/pending download. Check /active.", nil
+				return replacementBlockedMessage(row), nil
 			}
 		}
 		// Use ARR's cached release, without overriding title/quality/episode mapping.

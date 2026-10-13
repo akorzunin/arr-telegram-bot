@@ -467,7 +467,7 @@ func (b *Bot) languageCallback(action, key string, v *Selection) error {
 		}
 		for _, row := range rows {
 			if number(row[idKey]) == id {
-				return b.send(v.Chat, "Already has an active/pending download. Check /active before requesting a replacement.", nil)
+				return b.send(v.Chat, replacementBlockedMessage(row), nil)
 			}
 		}
 		v.Item["qualityProfileId"] = b.languageProfile(v.Kind, v.Language)
