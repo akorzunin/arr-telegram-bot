@@ -228,7 +228,7 @@ func (b *Bot) app(kind string) AppConfig {
 func (b *Bot) arr(kind, path string, data any, method string, out any) error {
 	app := b.app(kind)
 	resource := kind
-	if path == "/command" || strings.HasPrefix(path, "/episode") || strings.HasPrefix(path, "/history") || strings.HasPrefix(path, "/queue") || strings.HasPrefix(path, "/moviefile") {
+	if path == "/command" || strings.HasPrefix(path, "/episode") || strings.HasPrefix(path, "/history") || strings.HasPrefix(path, "/queue") || strings.HasPrefix(path, "/moviefile") || strings.HasPrefix(path, "/release") {
 		resource = ""
 	}
 	endpoint := strings.TrimRight(app.URL, "/") + "/api/v3/" + resource + strings.TrimPrefix(path, "/")

@@ -315,7 +315,7 @@ func (b *Bot) applyLibraryLanguage(key string, v *Selection) error {
 	// qualityProfileId now could let RSS upgrade a downloaded title without consent.
 	if v.Language == "russian" && !hasRussianAudio(files) {
 		v.Replace = true
-		return b.send(v.Chat, v.Label+"\nRussian audio is missing or unverified in one or more files. ARR cannot fetch standalone dubbing. Confirm a replacement search? The current file stays until ARR imports a replacement.\nThe audio/subtitle profile change is title-wide; for series, other monitored seasons may also upgrade.", [][]map[string]string{{{"text": "Confirm replacement search", "callback_data": "replace:" + key}, {"text": "Cancel", "callback_data": "cancel:" + key}}})
+		return b.send(v.Chat, v.Label+"\nRussian audio is missing or unverified in one or more files. ARR cannot fetch standalone dubbing. Confirm a replacement search? Explicit RuTracker RUS(int) audio tags may bypass broken language-score checks only; all other rejection checks stay. The current file stays until ARR imports a replacement.\nThe audio/subtitle profile change is title-wide; for series, other monitored seasons may also upgrade.", [][]map[string]string{{{"text": "Confirm replacement search", "callback_data": "replace:" + key}, {"text": "Cancel", "callback_data": "cancel:" + key}}})
 	}
 	v.Item["qualityProfileId"] = b.languageProfile(v.Kind, v.Language)
 	// Existing title monitoring is deliberately preserved.
@@ -326,7 +326,7 @@ func (b *Bot) applyLibraryLanguage(key string, v *Selection) error {
 		return err
 	}
 	v.Replace = true
-	return b.send(v.Chat, languageLabel(v.Language)+" profile saved. Bazarr will search missing subtitles after synchronization; availability is not guaranteed. No replacement search was started.\nIf the desired audio is absent, explicitly search a replacement:", [][]map[string]string{{{"text": "Confirm replacement search", "callback_data": "replace:" + key}, {"text": "Back", "callback_data": "pick:" + key}}})
+	return b.send(v.Chat, languageLabel(v.Language)+" profile saved. Bazarr will search missing subtitles after synchronization; availability is not guaranteed. No replacement search was started.\nIf the desired audio is absent, explicitly search a replacement (explicit RuTracker RUS(int) audio tags may bypass language-score checks only):", [][]map[string]string{{{"text": "Confirm replacement search", "callback_data": "replace:" + key}, {"text": "Back", "callback_data": "pick:" + key}}})
 }
 func (b *Bot) recordLanguageRequest(record RequestRecord) error {
 	record.LanguageChanged = time.Now().UnixNano()
@@ -506,6 +506,15 @@ func (b *Bot) languageCallback(action, key string, v *Selection) error {
 		}
 		// Consume confirmation before an uncertain command response; never automatically retry a search.
 		delete(b.pending, key)
+		if v.Language == "russian" && !hasRussianAudio(files) {
+			status, err := b.russianReplacement(v)
+			if err != nil {
+				return err
+			}
+			if status != "" {
+				return b.send(v.Chat, status, nil)
+			}
+		}
 		if err := b.arr(v.Kind, "/command", command, "", nil); err != nil {
 			return err
 		}

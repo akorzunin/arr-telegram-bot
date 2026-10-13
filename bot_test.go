@@ -39,6 +39,8 @@ type rig struct {
 	bazarrBodies    []map[string]any
 	bazarrFail      bool
 	bazarrRows      []map[string]any
+	releases        []map[string]any
+	failGrab        bool
 }
 
 func setup(t *testing.T) *rig {
@@ -187,6 +189,18 @@ func (r *rig) serve(w http.ResponseWriter, q *http.Request) {
 				break
 			}
 		}
+	case path == "/api/v3/release" && q.Method == "GET":
+		reply = []map[string]any{{"rejected": false, "downloadAllowed": true}}
+		if r.releases != nil {
+			reply = r.releases
+		}
+	case path == "/api/v3/release" && q.Method == "POST":
+		r.added = append(r.added, body)
+		if r.failGrab {
+			w.WriteHeader(500)
+			return
+		}
+		reply = body
 	case path == "/api/v3/command":
 		r.added = append(r.added, body)
 		reply = body

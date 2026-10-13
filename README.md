@@ -50,8 +50,14 @@ Use `/language TITLE` (or `/language TITLE S02`) for downloaded titles:
 - **Rebuild streaming audio** regenerates old single-audio optimized copies with all
   source audio tracks. Existing optimized files stay until a replacement validates.
 - ARR cannot fetch standalone dubbing. A confirmed replacement search keeps current
-  originals until ARR imports an accepted upgrade; it does not force a downgrade or
-  guarantee an eligible release.
+  originals until import; it does not force a downgrade or guarantee an eligible release.
+  For missing Russian audio, the bot first checks interactive search results. If ARR
+  accepts nothing, an explicit RuTracker `[RUS(int), ...]` internal-audio tag can
+  bypass only the managed 10000-point Russian-language minimum and equal-format-score
+  rejections (a parser bug can swallow tags before the year). Quality, seeders,
+  title matching, blocklists and every other rejection remain enforced. External
+  dubbing, subtitle-only tags and unknown rejection messages do not qualify.
+  A search with no safe candidate reports **no download**, not merely "queued".
 
 ARR/Bazarr profiles are **whole-title settings**, including the **whole series**;
 changing them can enable automatic upgrades of other monitored seasons. Extra subtitle
