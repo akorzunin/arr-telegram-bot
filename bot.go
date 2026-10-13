@@ -25,7 +25,7 @@ type AppConfig struct {
 }
 type Config struct {
 	Token                     string
-	Allowed                   map[int64]bool
+	Allowed, CleanupAllowed   map[int64]bool
 	StateDir, TelegramURL     string
 	TransmissionURL           string
 	Movie, Series             AppConfig
@@ -46,6 +46,7 @@ type State struct {
 	Offset   int64           `json:"offset"`
 	Cursor   map[string]int  `json:"cursor"`
 	Requests []RequestRecord `json:"requests"`
+	Cleanups []CleanupTask   `json:"cleanups,omitempty"`
 }
 type Selection struct {
 	Kind          string
@@ -56,6 +57,9 @@ type Selection struct {
 	Season        int
 	Confirmed     bool
 	RequestNumber int // One-based persistent request index for cancellation confirmation.
+	Cleanup       *CleanupPlan
+	CleanupList   []CleanupScope
+	CleanupPage   int
 }
 type Bot struct {
 	cfg     Config
@@ -215,7 +219,7 @@ func (b *Bot) app(kind string) AppConfig {
 func (b *Bot) arr(kind, path string, data any, method string, out any) error {
 	app := b.app(kind)
 	resource := kind
-	if path == "/command" || strings.HasPrefix(path, "/episode") || strings.HasPrefix(path, "/history") || strings.HasPrefix(path, "/queue") {
+	if path == "/command" || strings.HasPrefix(path, "/episode") || strings.HasPrefix(path, "/history") || strings.HasPrefix(path, "/queue") || strings.HasPrefix(path, "/moviefile") {
 		resource = ""
 	}
 	endpoint := strings.TrimRight(app.URL, "/") + "/api/v3/" + resource + strings.TrimPrefix(path, "/")
@@ -265,7 +269,7 @@ func (b *Bot) search(chat, user int64, text string) error {
 		kind = "series"
 	}
 	if text == "" || strings.HasPrefix(text, "/") {
-		return b.send(chat, "Send a title, /movie TITLE, or /series TITLE S02. Series default to season 1; only the requested season is monitored. Choose a match, then confirm. /active lists your downloads; /cancel NUMBER cancels a request after confirmation, keeping files. Plot descriptions are not supported yet.", nil)
+		return b.send(chat, "Send a title, /movie TITLE, or /series TITLE S02. Series default to season 1; only the requested season is monitored. Choose a match, then confirm. /active lists your downloads; /cancel NUMBER cancels a request after confirmation, keeping files. /list lists downloaded movies/seasons oldest first; /cleanup TITLE permanently deletes files, torrent data and optimized copies after confirmation. Plot descriptions are not supported yet.", nil)
 	}
 	if len(text) > 200 {
 		return b.send(chat, "Please use a title of at most 200 characters.", nil)
@@ -384,6 +388,9 @@ func (b *Bot) callback(q Callback) error {
 	if err := b.telegram("answerCallbackQuery", map[string]any{"callback_query_id": q.ID}); err != nil {
 		return err
 	}
+	if v.Cleanup != nil || v.CleanupList != nil {
+		return b.cleanupCallback(action, key, v)
+	}
 	switch action {
 	case "cancel":
 		delete(b.pending, key)
@@ -441,6 +448,9 @@ func (b *Bot) add(v *Selection) error {
 			existing = entry
 			break
 		}
+	}
+	if existing != nil && b.cleanupPending(v.Kind, number(existing["id"]), v.Season) {
+		return b.send(v.Chat, "Cleanup is still pending in the worker. Wait for /list to report completion before requesting this title again.", nil)
 	}
 	if existing != nil && v.Kind == "movie" {
 		if existing["hasFile"] != false {
@@ -557,6 +567,8 @@ func (b *Bot) handle(u Update) error {
 	} else if u.Message != nil && u.Message.Text != "" {
 		text := strings.TrimSpace(u.Message.Text)
 		switch {
+		case text == "/list" || text == "/cleanup" || strings.HasPrefix(text, "/cleanup "):
+			err = b.browseCleanup(chat.ID, from.ID, strings.TrimSpace(strings.TrimPrefix(text, "/cleanup")))
 		case text == "/active" || text == "/downloads":
 			err = b.active(chat.ID)
 		case text == "/retry" || strings.HasPrefix(text, "/retry "):

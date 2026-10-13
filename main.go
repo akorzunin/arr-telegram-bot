@@ -10,7 +10,7 @@ import (
 )
 
 func configFromEnv() (Config, error) {
-	cfg := Config{Token: strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN")), StateDir: "/state", Allowed: map[int64]bool{}}
+	cfg := Config{Token: strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN")), StateDir: "/state", Allowed: map[int64]bool{}, CleanupAllowed: map[int64]bool{}}
 	cfg.PreparationDir = strings.TrimSpace(os.Getenv("PREPARATION_DIR"))
 	cfg.MediaRoot = "/downloads"
 	cfg.TransmissionURL = strings.TrimSpace(os.Getenv("TRANSMISSION_URL"))
@@ -20,16 +20,18 @@ func configFromEnv() (Config, error) {
 	if cfg.Token == "" {
 		return cfg, errors.New("missing bot token")
 	}
-	for _, part := range strings.Split(os.Getenv("TELEGRAM_ALLOWED_USERS"), ",") {
-		part = strings.TrimSpace(part)
-		if part == "" {
-			continue
+	for name, users := range map[string]map[int64]bool{"TELEGRAM_ALLOWED_USERS": cfg.Allowed, "TELEGRAM_CLEANUP_USERS": cfg.CleanupAllowed} {
+		for _, part := range strings.Split(os.Getenv(name), ",") {
+			part = strings.TrimSpace(part)
+			if part == "" {
+				continue
+			}
+			id, err := strconv.ParseInt(part, 10, 64)
+			if err != nil || id <= 0 {
+				return cfg, errors.New("invalid allowed user ID")
+			}
+			users[id] = true
 		}
-		id, err := strconv.ParseInt(part, 10, 64)
-		if err != nil || id <= 0 {
-			return cfg, errors.New("invalid allowed user ID")
-		}
-		cfg.Allowed[id] = true
 	}
 	for _, kind := range []string{"RADARR", "SONARR"} {
 		key := strings.TrimSpace(os.Getenv(kind + "_API_KEY"))
@@ -89,6 +91,9 @@ func main() {
 	if cfg.PreparationDir != "" {
 		if err := prepareDirs(cfg.PreparationDir); err != nil {
 			log.Fatal("Cannot initialize preparation queue")
+		}
+		if err := bot.restoreCleanupTasks(); err != nil {
+			log.Fatal("Cannot restore optimized cleanup tasks")
 		}
 		if err := bot.cancelUnusedPreparation(); err != nil {
 			log.Fatal("Cannot restore preparation cancellation")

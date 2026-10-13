@@ -332,7 +332,11 @@ func (b *Bot) cancelRequest(chat int64, n int) error {
 }
 
 func (b *Bot) removeTorrents(ids []string) error {
-	body, _ := json.Marshal(map[string]any{"method": "torrent-remove", "arguments": map[string]any{"ids": ids, "delete-local-data": false}})
+	return b.transmissionRPC("torrent-remove", map[string]any{"ids": ids, "delete-local-data": false}, nil)
+}
+
+func (b *Bot) transmissionRPC(method string, arguments any, out any) error {
+	body, _ := json.Marshal(map[string]any{"method": method, "arguments": arguments})
 	session := ""
 	for attempt := 0; attempt < 2; attempt++ {
 		req, err := http.NewRequest("POST", b.cfg.TransmissionURL, bytes.NewReader(body))
@@ -356,12 +360,18 @@ func (b *Bot) removeTorrents(ids []string) error {
 			continue
 		}
 		var result struct {
-			Result string `json:"result"`
+			Result    string          `json:"result"`
+			Arguments json.RawMessage `json:"arguments"`
 		}
-		err = json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&result)
+		err = json.NewDecoder(io.LimitReader(resp.Body, 10<<20)).Decode(&result)
 		resp.Body.Close()
 		if resp.StatusCode != http.StatusOK || err != nil || result.Result != "success" {
-			return errors.New("Transmission removal failed")
+			return errors.New("Transmission RPC failed")
+		}
+		if out != nil {
+			if err := json.Unmarshal(result.Arguments, out); err != nil {
+				return errors.New("invalid Transmission arguments")
+			}
 		}
 		return nil
 	}

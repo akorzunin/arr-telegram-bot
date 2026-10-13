@@ -719,6 +719,9 @@ func (w *Worker) ensureIndexed(ctx context.Context, job PrepareJob) error {
 	return errors.New("Jellyfin has not indexed the output")
 }
 func (w *Worker) tick() error {
+	if err := w.cleanupTick(); err != nil {
+		return err
+	}
 	entries, err := os.ReadDir(filepath.Join(w.Queue, "requests"))
 	if err != nil {
 		return err

@@ -10,6 +10,7 @@ Requires these variables (normally `/srv/deploy/arr/bot.env`):
 | --- | --- |
 | `TELEGRAM_BOT_TOKEN` | Telegram bot token |
 | `TELEGRAM_ALLOWED_USERS` | Comma-separated Telegram numeric user IDs; empty preserves Python behavior and allows any private chat |
+| `TELEGRAM_CLEANUP_USERS` | Comma-separated IDs allowed to permanently delete media; defaults to `TELEGRAM_ALLOWED_USERS`, and deletion is disabled if both are empty. Does not restrict download requests or `/list`. |
 | `RADARR_API_KEY`, `SONARR_API_KEY` | ARR API credentials |
 | `RADARR_QUALITY_PROFILE_ID`, `SONARR_QUALITY_PROFILE_ID` | Positive numeric profile IDs |
 | `RADARR_URL`, `SONARR_URL` | Internal ARR URLs (compose overrides to `http://radarr:7878`, `http://sonarr:8989`) |
@@ -62,6 +63,64 @@ Checks use mock ARR, Telegram and Transmission servers; no real downloads or liv
 service integration is exercised by the unit tests. Publish the updated bot image
 before pulling/recreating the bot in the Ansible stack; this checkout alone does
 not change a running container.
+
+### Disk cleanup
+
+- `/list` (or `/cleanup`) lists downloaded **ARR** movies and individual
+  seasons, including titles added outside the bot. Eight per page, oldest first.
+  Dates are ARR file `dateAdded` (import date, not torrent start date); a season
+  uses its oldest currently imported file. Unknown dates sort last. Sizes count
+  imported files once, not actual reclaimable bytes: hardlinks, open player file
+  handles, torrent copies and optimized copies affect disk savings.
+- `/cleanup TITLE` searches the local library by case-insensitive title substring.
+  Append `S02` to select a season or `all` to select a whole series, e.g.
+  `/cleanup Show S02` or `/cleanup Show all`. A named search also includes empty
+  entries, so partial cleanup or orphaned optimized copies can be retried.
+- Select a candidate, inspect its scope/size/torrent count, then **Delete
+  permanently**. Both selection and final confirmation are private-chat/user-bound,
+  expire after 15 minutes, and cannot be replayed. Permanent deletion requires
+  membership in `TELEGRAM_CLEANUP_USERS` (or `TELEGRAM_ALLOWED_USERS` when cleanup
+  admins are unset). Leave `TELEGRAM_ALLOWED_USERS` empty to keep download requests
+  and read-only `/list` open while restricting deletion to cleanup admins.
+  No admins in either list means deletion is disabled. Identity is checked again
+  at final confirmation. Files/torrents are rechecked before deletion;
+  changed plans require a fresh confirmation. Listing itself never deletes files.
+- Cleanup disables monitoring, cancels every saved request for that shared scope
+  (across chats), deletes associated Transmission torrents with
+  `delete-local-data=true`, then deletes imported files through ARR. **ARR entries
+  are retained** to preserve history and make failures retryable. A season leaves
+  other seasons and their monitoring unchanged; whole-series cleanup also disables
+  monitoring of new seasons. This is shared-library deletion, not per-user removal.
+- Safety checks refuse any title with an ARR queue entry (cancel downloads first),
+  episode files shared across seasons, history hashes shared with another scope,
+  torrents sharing data paths, and torrents with unproven video/unknown files.
+  Association uses import history hashes/paths or exact imported-file paths;
+  every torrent video must be proven to belong to the selected scope. No fuzzy
+  filename guesses. Mixed-season packs can only be removed as a whole series when
+  every video is proven. History scans are capped at 100 pages of 100 records
+  per app; reaching the cap fails closed. Transmission and ARR must use the same
+  `/downloads` paths.
+- With `PREPARATION_DIR` enabled, cleanup cancels matching preparation jobs and
+  queues optimized-directory deletion. The **updated worker must be running**:
+  it removes the selected movie/season directory, subtitle sidecars and abandoned
+  staging data on its single worker thread, then refreshes Jellyfin. This avoids
+  deleting alongside an encode/subtitle sync or allowing old jobs to resurrect
+  copies. Receipts survive restarts; `/list` reports pending/complete cleanup.
+  Re-requests of an overlapping scope are blocked until completion. No writable
+  media/optimized mount or new credentials are needed on the bot. If preparation
+  is disabled, confirmation explicitly warns that existing optimized copies remain.
+- Untracked Transmission-only titles and unidentified duplicates are **not**
+  included or guessed; use Transmission/Jellyfin for those. ARR recycle-bin files
+  are not purged (the checked workstation has recycling disabled). Cleanup is
+  nontransactional: failures can leave monitoring disabled or only some copies
+  removed. Inspect ARR/Transmission, then repeat the named cleanup. Already-running
+  explicit searches or external changes can race cleanup; inspect for later grabs.
+  Keep the media/output trees service-owned; external concurrent symlink/rename
+  manipulation is outside these single-host guarantees.
+
+Publish and redeploy **both bot and worker images** before using optimized cleanup;
+old workers do not process cleanup tasks. Tests use mock services and temporary
+output trees; no live deletion is exercised.
 
 ## Automatic streaming preparation (opt-in)
 
@@ -122,8 +181,8 @@ checks the matching library exists before encoding and refreshes/index-verifies
 published video by path and indexed file size. It does not automatically create
 libraries or alter users.
 
-Back up `notifications.json` and the queue's `requests/`, `results/`, and `cancel/`
-together. JSON state includes media paths/titles/chat IDs, not API keys. Queue files
+Back up `notifications.json` and the queue's `requests/`, `results/`, `cancel/`,
+`cleanup/`, and `cleanup-done/` together. JSON state includes media paths/titles/chat IDs, not API keys. Queue files
 are retained for restart/deduplication; per-tick queue scans become quadratic with
 large histories, so introduce an output-key index/retention before thousands of jobs.
 The worker polls every 30 seconds when idle; status discovery remains tied to

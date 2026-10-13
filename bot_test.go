@@ -433,12 +433,17 @@ func TestConfigRequiresCredentialsAndPositiveProfiles(t *testing.T) {
 	t.Setenv("RADARR_ROOT", "/movies")
 	t.Setenv("SONARR_ROOT", "/tv")
 	t.Setenv("TELEGRAM_ALLOWED_USERS", "7, 8")
+	t.Setenv("TELEGRAM_CLEANUP_USERS", "7")
 	cfg, err := configFromEnv()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cfg.Allowed[7] || !cfg.Allowed[8] || cfg.StateDir != "/state" {
+	if !cfg.Allowed[7] || !cfg.Allowed[8] || !cfg.CleanupAllowed[7] || cfg.CleanupAllowed[8] || cfg.StateDir != "/state" {
 		t.Fatalf("cfg %#v", cfg)
+	}
+	t.Setenv("TELEGRAM_CLEANUP_USERS", "invalid")
+	if _, err := configFromEnv(); err == nil {
+		t.Fatal("invalid cleanup admin ID accepted")
 	}
 }
 func TestPollingUsesOffsetAndCheckpoints(t *testing.T) {

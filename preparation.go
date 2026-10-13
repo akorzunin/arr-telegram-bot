@@ -42,7 +42,7 @@ type PreparationRef struct {
 }
 
 func prepareDirs(root string) error {
-	for _, dir := range []string{"requests", "results", "cancel"} {
+	for _, dir := range []string{"requests", "results", "cancel", "cleanup", "cleanup-done"} {
 		if err := os.MkdirAll(filepath.Join(root, dir), 0700); err != nil {
 			return err
 		}
