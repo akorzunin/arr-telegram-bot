@@ -98,6 +98,39 @@ func (b *Bot) active(chat int64) error {
 		}
 		lines := []string{}
 		queued := false
+		showManual := req.ManualHash != ""
+		if showManual && req.ManualImport {
+			complete, err := b.requestComplete(req)
+			if err != nil {
+				return err
+			}
+			showManual = !complete
+		}
+		if showManual {
+			var manual struct {
+				Torrents []struct {
+					Done  float64 `json:"percentDone"`
+					Error string  `json:"errorString"`
+				} `json:"torrents"`
+			}
+			if err := b.transmissionRPC("torrent-get", map[string]any{"ids": []string{req.ManualHash}, "fields": []string{"percentDone", "errorString"}}, &manual); err != nil {
+				return err
+			}
+			if len(manual.Torrents) == 0 {
+				lines = append(lines, "Manual torrent no longer in Transmission; check ARR import status.")
+			} else {
+				t := manual.Torrents[0]
+				queued = t.Done < 1
+				line := fmt.Sprintf("Manual torrent %.0f%%", t.Done*100)
+				if t.Error != "" {
+					line += " · " + t.Error
+				}
+				if req.ManualImport {
+					line += " · import submitted or needs review in ARR"
+				}
+				lines = append(lines, line)
+			}
+		}
 		seen := map[string]bool{}
 		for _, row := range rows {
 			matches, err := queueMatches(req, row)
@@ -199,7 +232,7 @@ func (b *Bot) active(chat int64) error {
 		}
 		chunk += line
 	}
-	return b.send(chat, chunk, nil)
+	return b.send(chat, chunk, [][]map[string]string{{{"text": "Manage requests", "callback_data": "requests:0"}}})
 }
 
 func (b *Bot) requestComplete(req RequestRecord) (bool, error) {
@@ -269,6 +302,11 @@ func (b *Bot) cancelRequest(chat int64, n int) error {
 	}
 	var selected []map[string]any
 	hashes := map[string]bool{}
+	for _, r := range b.state.Requests {
+		if !r.Cancelled && r.Kind == req.Kind && r.ItemID == req.ItemID && (req.Kind == "movie" || r.Season == req.Season) && r.ManualHash != "" {
+			hashes[r.ManualHash] = true
+		}
+	}
 	for _, row := range rows {
 		match, err := queueMatches(req, row)
 		if err != nil {

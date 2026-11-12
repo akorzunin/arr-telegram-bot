@@ -14,33 +14,37 @@ import (
 )
 
 type rig struct {
-	t               *testing.T
-	server          *httptest.Server
-	bot             *Bot
-	calls           []string
-	messages        []string
-	failSend        bool
-	historyMovie    []map[string]any
-	historySeries   []map[string]any
-	existingMovie   []map[string]any
-	existingSeries  []map[string]any
-	added           []map[string]any
-	episodes        []map[string]any
-	queueMovie      []map[string]any
-	queueSeries     []map[string]any
-	transmission    []map[string]any
-	failRemove      bool
-	queueGone       bool
-	failQueueDelete bool
-	movieDetail     map[string]any
-	seriesDetail    map[string]any
-	episodeFiles    map[int]map[string]any
-	bazarrSynced    bool
-	bazarrBodies    []map[string]any
-	bazarrFail      bool
-	bazarrRows      []map[string]any
-	releases        []map[string]any
-	failGrab        bool
+	t                 *testing.T
+	server            *httptest.Server
+	bot               *Bot
+	calls             []string
+	messages          []string
+	failSend          bool
+	historyMovie      []map[string]any
+	historySeries     []map[string]any
+	existingMovie     []map[string]any
+	existingSeries    []map[string]any
+	added             []map[string]any
+	episodes          []map[string]any
+	queueMovie        []map[string]any
+	queueSeries       []map[string]any
+	transmission      []map[string]any
+	failRemove        bool
+	queueGone         bool
+	failQueueDelete   bool
+	movieDetail       map[string]any
+	seriesDetail      map[string]any
+	episodeFiles      map[int]map[string]any
+	bazarrSynced      bool
+	bazarrBodies      []map[string]any
+	bazarrFail        bool
+	bazarrRows        []map[string]any
+	releases          []map[string]any
+	failGrab          bool
+	telegramBodies    []map[string]any
+	transmissionReply map[string]any
+	manualFiles       []map[string]any
+	manualReprocess   []map[string]any
 }
 
 func setup(t *testing.T) *rig {
@@ -58,8 +62,9 @@ func (r *rig) serve(w http.ResponseWriter, q *http.Request) {
 	path := q.URL.Path
 	r.calls = append(r.calls, q.Method+" "+path+"?"+q.URL.RawQuery)
 	w.Header().Set("Content-Type", "application/json")
-	var body map[string]any
-	_ = json.NewDecoder(q.Body).Decode(&body)
+	var raw any
+	_ = json.NewDecoder(q.Body).Decode(&raw)
+	body, _ := raw.(map[string]any)
 	reply := any(map[string]any{})
 	switch {
 	case path == "/bottest-token/sendMessage":
@@ -68,6 +73,7 @@ func (r *rig) serve(w http.ResponseWriter, q *http.Request) {
 			return
 		}
 		r.messages = append(r.messages, fmt.Sprint(body["text"]))
+		r.telegramBodies = append(r.telegramBodies, body)
 		reply = map[string]any{"ok": true, "result": map[string]any{"message_id": 1}}
 	case path == "/bottest-token/answerCallbackQuery":
 		reply = map[string]any{"ok": true, "result": true}
@@ -138,7 +144,7 @@ func (r *rig) serve(w http.ResponseWriter, q *http.Request) {
 			w.WriteHeader(500)
 			return
 		}
-		reply = map[string]any{"result": "success"}
+		reply = map[string]any{"result": "success", "arguments": r.transmissionReply}
 	case strings.HasPrefix(path, "/api/") && !strings.HasPrefix(path, "/api/v3/"):
 		if q.Header.Get("X-Api-Key") != "bazarr-secret" {
 			r.t.Error("missing Bazarr auth")
@@ -201,6 +207,11 @@ func (r *rig) serve(w http.ResponseWriter, q *http.Request) {
 			return
 		}
 		reply = body
+	case path == "/api/v3/manualimport":
+		if q.Method == "POST" {
+			r.manualReprocess = maps(raw)
+		}
+		reply = r.manualFiles
 	case path == "/api/v3/command":
 		r.added = append(r.added, body)
 		reply = body

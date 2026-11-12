@@ -289,6 +289,24 @@ func availableSpace(dir string, required uint64) bool {
 	}
 	return st.Bavail*uint64(st.Bsize) >= required
 }
+
+// Retain only a bounded tail for classification; never expose source paths in logs/chat.
+type ffmpegErrors []byte
+
+func (b *ffmpegErrors) Write(p []byte) (int, error) {
+	const limit = 16384
+	n := len(p)
+	if len(p) >= limit {
+		*b = append((*b)[:0], p[len(p)-limit:]...)
+	} else {
+		if len(*b)+len(p) > limit {
+			*b = (*b)[len(*b)+len(p)-limit:]
+		}
+		*b = append(*b, p...)
+	}
+	return n, nil
+}
+
 func (w *Worker) runFFmpeg(ctx context.Context, job PrepareJob, args []string, duration float64, result *PrepareResult) error {
 	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
 	stdout, err := cmd.StdoutPipe()
@@ -296,7 +314,8 @@ func (w *Worker) runFFmpeg(ctx context.Context, job PrepareJob, args []string, d
 		return err
 	}
 	// FFmpeg errors can contain paths/titles; keep them out of generic service logs.
-	cmd.Stderr = io.Discard
+	var stderr ffmpegErrors
+	cmd.Stderr = &stderr
 	if err = cmd.Start(); err != nil {
 		return err
 	}
@@ -333,7 +352,16 @@ func (w *Worker) runFFmpeg(ctx context.Context, job PrepareJob, args []string, d
 		_ = cmd.Wait()
 		return err
 	}
-	return cmd.Wait()
+	err = cmd.Wait()
+	if err != nil {
+		text := strings.ToLower(string(stderr))
+		for _, marker := range []string{"cuda_error_no_device", "no cuda-capable device", "cannot load libcuda", "cannot load libnvidia-encode", "no capable devices found", "driver does not support the required nvenc"} {
+			if strings.Contains(text, marker) {
+				return errors.New("GPU access unavailable; recreate the preparation container, verify NVENC, then retry preparation")
+			}
+		}
+	}
+	return err
 }
 func validateOutput(ctx context.Context, path string, original float64) error {
 	probe, err := probeMedia(ctx, path)
@@ -514,6 +542,9 @@ func (w *Worker) process(job PrepareJob) error {
 	if err = w.runFFmpeg(ctx, job, encodeArgs(job.Source, stage, video, audio, copyVideo, additionalAudio(probe, audio)...), duration, &result); err != nil {
 		if w.cancelled(job) || w.superseded(job) {
 			return fail("cancelled", "preparation cancelled or superseded")
+		}
+		if strings.HasPrefix(err.Error(), "GPU access unavailable;") {
+			return fail("failed", err.Error())
 		}
 		return fail("failed", "FFmpeg failed; check GPU access and source compatibility")
 	}

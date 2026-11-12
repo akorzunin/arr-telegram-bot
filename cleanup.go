@@ -116,6 +116,9 @@ func (b *Bot) browseCleanup(chat, user int64, query string) error {
 		fmt.Sscanf(query[m[2]:m[3]], "%d", &season)
 		query = strings.TrimSpace(query[:m[0]])
 	}
+	if _, r := b.request(chat, query); r != nil && season < 0 && r.Kind == "series" {
+		season = r.Season
+	}
 	whole := strings.HasSuffix(strings.ToLower(query), " all")
 	if whole {
 		query = strings.TrimSpace(query[:len(query)-4])
@@ -132,7 +135,7 @@ func (b *Bot) browseCleanup(chat, user int64, query string) error {
 		}
 		for _, item := range items {
 			title, _ := item["title"].(string)
-			if !strings.Contains(strings.ToLower(title), strings.ToLower(query)) {
+			if !b.itemMatches(chat, query, kind, item) {
 				continue
 			}
 			scope := CleanupScope{Kind: kind, ItemID: number(item["id"]), Season: -1, Label: title}

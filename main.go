@@ -132,6 +132,9 @@ func main() {
 			log.Printf("History polling failed; retrying: %v", err)
 			time.Sleep(5 * time.Second)
 		}
+		if err := bot.pollMagnets(); err != nil {
+			log.Print("Manual torrent import failed; check ARR/Transmission before retrying")
+		}
 		if err := bot.pollLanguages(); err != nil {
 			log.Print("Subtitle profile synchronization failed; will retry")
 		}

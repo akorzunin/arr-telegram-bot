@@ -30,6 +30,37 @@ Build: `CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o arr-telegram-bot .`
 
 Send a plain title to search both apps, `/movie TITLE`, or `/series TITLE S02` (also `season 2`). At most five results per app; select, then confirm within 15 minutes. A series defaults to season 1. A new movie searches immediately. A confirmed re-request of an existing movie with no file and no active/pending ARR queue entry re-enables monitoring and runs `MoviesSearch`, preserving its profile and path. With language support disabled, movies with files or active queue entries are left unchanged. With language support enabled, downloaded titles enter the confirmed language-management flow; active downloads are not duplicated. A new series monitors only the requested season; an existing series monitors the requested season and its episodes, and queues `SeasonSearch`. The bot checks history `downloadFolderImported` events; it sends a chat notification only for tracked request IDs and requested episode selections. For a new series, the episode's season is checked via Sonarr before notifying. A startup history high-water mark prevents old imports from being attributed to later requests. An unsuccessful Telegram send leaves the checkpoint behind for a later retry (successful sends can still duplicate if the process crashes between Telegram acceptance and durable checkpoint). An update offset is written before handling each update, as in the Python bot: crashes can drop an unhandled request but cannot replay an add.
 
+### Buttons and item IDs
+
+`/start` or `/menu` opens a persistent keyboard: **My requests**, **Downloads**,
+**Languages**, **Library**, **Search**, and **Help**. My requests includes completed
+items, newest first, with pagination. Choose an item for audio/subtitles, manual
+magnet submission, preparation retry, or cancellation; destructive actions still
+require confirmation. These item buttons survive bot restarts.
+
+`/item 11` (or simply `11`) opens bot request #11. `/language 11` and `/cleanup 11`
+use the same stable, chat-scoped request IDs, not Radarr/Sonarr IDs. For ARR titles
+without a bot request, use `/language movie:7` or `/language series:2 S02` (also
+supported by `/cleanup`). Numeric IDs never fall back to title substring matching.
+
+### Manual magnets
+
+Use **My requests → item → Provide magnet link**, then paste the link, or send
+`/set 11 magnet:?xt=urn:btih:…`. Confirm the displayed target and torrent before
+anything downloads. Hex and base32 v1 info hashes are supported, with or without
+`dn`. Magnet selection bypasses indexer quality/language checks; verify the content.
+Existing ARR downloads and already-existing Transmission torrents are not duplicated.
+
+The bot persists the torrent hash, tracks progress in Downloads, and imports after
+completion through ARR's manual-import API using copy mode (torrent data remains
+available for seeding). Movies are explicitly mapped to the selected item even if
+release names are unparseable. Series files must already resolve to the selected
+series and season. Rejected files and ambiguous multi-movie packs require review
+in ARR; nothing is forcibly imported. One manual torrent is tracked per request;
+review it in ARR/Transmission before attempting another. An uncertain import
+submission is not automatically replayed. The current stack shares `/downloads`
+between Transmission and ARR; other mount layouts require path mapping first.
+
 ### Language profiles and extra tracks
 
 With the optional language configuration enabled, confirmation offers **Original + EN**
@@ -39,7 +70,9 @@ of 10000; original audio adds 100 to prefer releases containing both. Release me
 can be wrong; worker-ready notifications warn when requested Russian audio is missing
 or unverified. Streaming readiness does not guarantee subtitle availability.
 
-Use `/language TITLE` (or `/language TITLE S02`) for downloaded titles:
+Use `/language REQUEST_ID`, `/language TITLE`, or `/language TITLE S02`.
+Undownloaded titles can save a profile after confirmation without starting another
+search. Downloaded titles additionally support:
 
 - Inspect ARR's reported audio language tags; missing tags mean unknown, not absence.
 - Apply a language profile after confirmation. Missing/unverified Russian audio needs
@@ -72,6 +105,7 @@ Browsing shows at most 20 matches; narrow the title to find additional entries.
 
 ### Download controls
 
+- `/requests` lists all active (including completed) request records with item buttons.
 - `/active` (alias `/downloads`) lists this private chat's saved bot requests with
   ARR queue status/progress, or a waiting/no-eligible-release message when files
   are missing but no torrent is active. Completed requests without a queue entry
@@ -164,6 +198,22 @@ not change a running container.
 Publish and redeploy **both bot and worker images** before using optimized cleanup;
 old workers do not process cleanup tasks. Tests use mock services and temporary
 output trees; no live deletion is exercised.
+
+## GPU access troubleshooting
+
+`GPU access unavailable` means FFmpeg could not initialize CUDA/NVENC. Test an
+encode **inside the preparation container**, not just `nvidia-smi` on the host:
+
+```sh
+docker exec arr-prepare-1 ffmpeg -v error -f lavfi -i color=size=128x128:rate=1 -t 1 -c:v h264_nvenc -f null -
+```
+
+A stale NVIDIA container/cgroup device grant can survive host device changes.
+Recreate **only** the worker (`docker compose --profile prepare up -d --no-deps
+--force-recreate prepare`), retest, then use Retry preparation. Do not restart the
+whole Docker daemon or delete original media. FFmpeg stderr is bounded and used
+only for safe error classification; private source paths are not logged or sent.
+The separate image/styled-subtitle warning is informational, not the encode error.
 
 ## Automatic streaming preparation (opt-in)
 

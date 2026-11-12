@@ -47,6 +47,8 @@ type RequestRecord struct {
 	SubsApplied     bool             `json:"subs_applied,omitempty"`
 	LanguageChanged int64            `json:"language_changed,omitempty"`
 	Preparation     []PreparationRef `json:"preparation,omitempty"`
+	ManualHash      string           `json:"manual_hash,omitempty"`
+	ManualImport    bool             `json:"manual_import,omitempty"`
 }
 type State struct {
 	Offset   int64           `json:"offset"`
@@ -66,6 +68,8 @@ type Selection struct {
 	Library       bool
 	Replace       bool
 	RequestNumber int // One-based persistent request index for cancellation confirmation.
+	AwaitMagnet   bool
+	Magnet        string
 	Cleanup       *CleanupPlan
 	CleanupList   []CleanupScope
 	CleanupPage   int
@@ -228,7 +232,7 @@ func (b *Bot) app(kind string) AppConfig {
 func (b *Bot) arr(kind, path string, data any, method string, out any) error {
 	app := b.app(kind)
 	resource := kind
-	if path == "/command" || strings.HasPrefix(path, "/episode") || strings.HasPrefix(path, "/history") || strings.HasPrefix(path, "/queue") || strings.HasPrefix(path, "/moviefile") || strings.HasPrefix(path, "/release") {
+	if path == "/command" || strings.HasPrefix(path, "/episode") || strings.HasPrefix(path, "/history") || strings.HasPrefix(path, "/queue") || strings.HasPrefix(path, "/moviefile") || strings.HasPrefix(path, "/release") || strings.HasPrefix(path, "/manualimport") {
 		resource = ""
 	}
 	endpoint := strings.TrimRight(app.URL, "/") + "/api/v3/" + resource + strings.TrimPrefix(path, "/")
@@ -384,6 +388,9 @@ func buildPayload(kind string, item map[string]any, app AppConfig, season int) (
 	return p, nil
 }
 func (b *Bot) callback(q Callback) error {
+	if handled, err := b.navigation(q); handled {
+		return err
+	}
 	parts := strings.SplitN(q.Data, ":", 2)
 	action, key := "", ""
 	if len(parts) == 2 {
@@ -396,6 +403,10 @@ func (b *Bot) callback(q Callback) error {
 	}
 	if err := b.telegram("answerCallbackQuery", map[string]any{"callback_query_id": q.ID}); err != nil {
 		return err
+	}
+	if action == "magnetadd" && v.Magnet != "" {
+		delete(b.pending, key)
+		return b.addMagnet(v)
 	}
 	if v.Library {
 		return b.languageCallback(action, key, v)
@@ -616,6 +627,24 @@ func (b *Bot) handle(u Update) error {
 	} else if u.Message != nil && u.Message.Text != "" {
 		text := strings.TrimSpace(u.Message.Text)
 		switch {
+		case text == "/start" || text == "/menu" || text == "Help" || text == "/help":
+			err = b.menu(chat.ID)
+		case text == "Search":
+			err = b.send(chat.ID, "Send a movie or series title. For a specific season, append S02 (otherwise season 1).", nil)
+		case text == "My requests" || text == "/requests":
+			err = b.requestsPage(chat.ID, 0)
+		case text == "Downloads":
+			err = b.active(chat.ID)
+		case text == "Languages":
+			err = b.browseLanguages(chat.ID, from.ID, "")
+		case text == "Library":
+			err = b.browseCleanup(chat.ID, from.ID, "")
+		case text == "/item" || strings.HasPrefix(text, "/item "):
+			err = b.itemPanel(chat.ID, strings.TrimSpace(strings.TrimPrefix(text, "/item")))
+		case text == "/set" || strings.HasPrefix(text, "/set "):
+			err = b.setMagnet(chat.ID, from.ID, text)
+		case strings.HasPrefix(text, "magnet:"):
+			_, err = b.magnetReply(chat.ID, from.ID, text)
 		case text == "/language" || strings.HasPrefix(text, "/language "):
 			err = b.browseLanguages(chat.ID, from.ID, strings.TrimSpace(strings.TrimPrefix(text, "/language")))
 		case text == "/list" || text == "/cleanup" || strings.HasPrefix(text, "/cleanup "):
@@ -632,7 +661,11 @@ func (b *Bot) handle(u Update) error {
 		case text == "/cancel" || strings.HasPrefix(text, "/cancel "):
 			err = b.confirmCancellation(chat.ID, from.ID, text)
 		default:
-			err = b.search(chat.ID, from.ID, text)
+			if _, r := b.request(chat.ID, text); r != nil {
+				err = b.itemPanel(chat.ID, text)
+			} else {
+				err = b.search(chat.ID, from.ID, text)
+			}
 		}
 	}
 	if err != nil {

@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -134,6 +135,20 @@ func (b *Bot) pollLanguages() error {
 	return nil
 }
 
+func (b *Bot) itemMatches(chat int64, query, kind string, item map[string]any) bool {
+	if _, err := strconv.Atoi(strings.TrimPrefix(query, "#")); err == nil {
+		_, r := b.request(chat, query)
+		return r != nil && r.Kind == kind && r.ItemID == number(item["id"])
+	}
+	for _, prefix := range []string{"movie:", "series:"} {
+		if strings.HasPrefix(query, prefix) {
+			id, _ := strconv.Atoi(strings.TrimPrefix(query, prefix))
+			return kind+":" == prefix && id > 0 && id == number(item["id"])
+		}
+	}
+	return strings.Contains(strings.ToLower(field(item, "title")), strings.ToLower(query))
+}
+
 func (b *Bot) browseLanguages(chat, user int64, query string) error {
 	if !b.languagesEnabled() {
 		return b.send(chat, "Language profiles are not configured. Configure ARR Russian profiles and Bazarr first.", nil)
@@ -151,6 +166,9 @@ func (b *Bot) browseLanguages(chat, user int64, query string) error {
 		fmt.Sscanf(query[m[2]:m[3]], "%d", &season)
 		query = strings.TrimSpace(query[:m[0]])
 	}
+	if _, r := b.request(chat, query); r != nil && season < 0 && r.Kind == "series" {
+		season = r.Season
+	}
 	buttons := [][]map[string]string{}
 	for _, kind := range []string{"movie", "series"} {
 		var items []map[string]any
@@ -159,22 +177,24 @@ func (b *Bot) browseLanguages(chat, user int64, query string) error {
 		}
 		for _, item := range items {
 			title, _ := item["title"].(string)
-			if !strings.Contains(strings.ToLower(title), strings.ToLower(query)) {
+			if !b.itemMatches(chat, query, kind, item) {
 				continue
 			}
 			scopes := []int{0}
 			if kind == "movie" {
-				if season >= 0 || item["hasFile"] != true {
+				if season >= 0 {
 					continue
 				}
 			} else {
-				var files []map[string]any
-				if err := b.arr(kind, fmt.Sprintf("/episodefile?seriesId=%d", number(item["id"])), nil, "", &files); err != nil {
-					return err
-				}
 				scopes = nil
-				for _, f := range files {
-					n := number(f["seasonNumber"])
+				available := seasons(item)
+				if len(available) == 0 {
+					if err := b.arr(kind, fmt.Sprintf("/episodefile?seriesId=%d", number(item["id"])), nil, "", &available); err != nil {
+						return err
+					}
+				}
+				for _, s := range available {
+					n := number(s["seasonNumber"])
 					if (season < 0 || season == n) && !contains(scopes, n) {
 						scopes = append(scopes, n)
 					}
@@ -206,9 +226,9 @@ func (b *Bot) browseLanguages(chat, user int64, query string) error {
 		}
 	}
 	if len(buttons) == 0 {
-		return b.send(chat, "No downloaded titles matched. Use /language TITLE or /language TITLE S02.", nil)
+		return b.send(chat, "No titles matched. Use /language REQUEST_ID, /language TITLE, or /language movie:ARR_ID (series:ARR_ID S02 for a season).", nil)
 	}
-	return b.send(chat, "Choose downloaded media (up to 20 matches; narrow the title if needed):", buttons)
+	return b.send(chat, "Choose media (up to 20 matches; narrow the title or use a request ID):", buttons)
 }
 func (b *Bot) libraryFiles(v *Selection) ([]map[string]any, error) {
 	var item map[string]any
@@ -286,7 +306,7 @@ func (b *Bot) languagePanel(key string, v *Selection) error {
 		return err
 	}
 	if len(files) == 0 {
-		return b.send(v.Chat, "Files are no longer downloaded; search/request the title again.", nil)
+		return b.send(v.Chat, v.Label+"\nNot downloaded yet. Choose the audio/subtitle profile to use for this title. Profiles apply to the whole title/series; a magnet you provide yourself is not checked against them.", languageButtons(key, "profile-"))
 	}
 	text := v.Label + "\nAudio tags reported by ARR: " + audioTags(files) + ". Unknown/wrong tags cannot verify a language.\nChoose a profile, fetch extra subtitles without changing the profile, or rebuild the streaming copy."
 	if v.Kind == "series" {
@@ -309,7 +329,14 @@ func (b *Bot) applyLibraryLanguage(key string, v *Selection) error {
 		return err
 	}
 	if len(files) == 0 {
-		return b.send(v.Chat, "No downloaded files remain.", nil)
+		v.Item["qualityProfileId"] = b.languageProfile(v.Kind, v.Language)
+		if err := b.arr(v.Kind, fmt.Sprintf("/%d", number(v.Item["id"])), v.Item, "PUT", nil); err != nil {
+			return err
+		}
+		if err := b.recordLanguageRequest(b.languageRecord(v)); err != nil {
+			return err
+		}
+		return b.send(v.Chat, languageLabel(v.Language)+" profile saved. Bazarr will search after import; no new download search was started.", nil)
 	}
 	// Do not enable audio upgrades until the replacement confirmation. Changing
 	// qualityProfileId now could let RSS upgrade a downloaded title without consent.
