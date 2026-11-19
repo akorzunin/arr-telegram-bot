@@ -716,6 +716,8 @@ func (w *Worker) syncSubtitles(ctx context.Context, job PrepareJob, probe MediaP
 		return err
 	}
 	outbase := strings.TrimSuffix(destination, filepath.Ext(destination))
+	args := []string{"-v", "error", "-nostdin", "-y", "-i", job.Source}
+	subtitles := []string{}
 	for _, stream := range probe.Streams {
 		format := subtitleFormat(stream.Codec)
 		if stream.Type != "subtitle" || format == "" {
@@ -739,17 +741,28 @@ func (w *Worker) syncSubtitles(ctx context.Context, job PrepareJob, probe MediaP
 		if format == "sup" {
 			codec = "copy"
 		}
-		cmd := exec.CommandContext(ctx, "ffmpeg", "-v", "error", "-nostdin", "-y", "-i", job.Source, "-map", fmt.Sprintf("0:%d", stream.Index), "-c:s", codec, "-f", format, tmp)
-		cmd.Stderr = io.Discard
-		if cmd.Run() != nil {
-			_ = os.Remove(tmp)
-			return errors.New("subtitle extraction failed")
+		args = append(args, "-map", fmt.Sprintf("0:%d", stream.Index), "-c:s", codec, "-f", format, tmp)
+		subtitles = append(subtitles, subtitle)
+	}
+	if len(subtitles) == 0 {
+		return nil
+	}
+	defer func() {
+		for _, subtitle := range subtitles {
+			_ = os.Remove(subtitle + ".tmp")
 		}
-		if err = os.Chmod(tmp, 0644); err != nil {
-			_ = os.Remove(tmp)
+	}()
+	// One demux pass for all tracks; per-track invocations reread entire Blu-rays.
+	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
+	cmd.Stderr = io.Discard
+	if cmd.Run() != nil {
+		return errors.New("subtitle extraction failed")
+	}
+	for _, subtitle := range subtitles {
+		if err = os.Chmod(subtitle+".tmp", 0644); err != nil {
 			return err
 		}
-		if err = os.Rename(tmp, subtitle); err != nil {
+		if err = os.Rename(subtitle+".tmp", subtitle); err != nil {
 			return err
 		}
 	}

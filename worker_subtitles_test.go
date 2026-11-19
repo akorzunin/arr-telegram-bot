@@ -79,7 +79,7 @@ func TestWorkerRealPGSExtractionAndReadyBackfill(t *testing.T) {
 		t.Fatal(err)
 	}
 	source := filepath.Join(media, "input.mkv")
-	cmd := exec.Command("ffmpeg", "-v", "error", "-nostdin", "-f", "lavfi", "-i", "color=size=256x144:rate=24", "-i", pgs, "-t", "3", "-map", "0:v", "-map", "1:s", "-c:v", "libx264", "-c:s", "copy", "-metadata:s:s:0", "language=eng", "-disposition:s:0", "default+forced", source)
+	cmd := exec.Command("ffmpeg", "-v", "error", "-nostdin", "-f", "lavfi", "-i", "color=size=256x144:rate=24", "-i", pgs, "-t", "3", "-map", "0:v", "-map", "1:s", "-map", "1:s", "-c:v", "libx264", "-c:s", "copy", "-metadata:s:s:0", "language=eng", "-disposition:s:0", "default+forced", "-metadata:s:s:1", "language=fre", "-disposition:s:1", "0", source)
 	if data, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("fixture: %v %s", err, data)
 	}
@@ -91,9 +91,25 @@ func TestWorkerRealPGSExtractionAndReadyBackfill(t *testing.T) {
 		t.Fatal(err)
 	}
 	w := &Worker{Queue: queue, Media: media, Output: output}
+	realFFmpeg, _ := exec.LookPath("ffmpeg")
+	calls := filepath.Join(t.TempDir(), "calls")
+	wrapper := t.TempDir()
+	if err := os.WriteFile(filepath.Join(wrapper, "ffmpeg"), []byte("#!/bin/sh\nprintf 'call\\n' >> \"$FFMPEG_CALLS\"\nexec \"$REAL_FFMPEG\" \"$@\"\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("REAL_FFMPEG", realFFmpeg)
+	t.Setenv("FFMPEG_CALLS", calls)
+	t.Setenv("PATH", wrapper+":"+os.Getenv("PATH"))
 	stage := t.TempDir()
 	if err := w.stageSubtitles(context.Background(), job, probe, stage); err != nil {
 		t.Fatal(err)
+	}
+	invocations, _ := os.ReadFile(calls)
+	if string(invocations) != "call\n" {
+		t.Fatal("subtitle tracks required more than one source demux pass")
+	}
+	if _, err := os.Stat(filepath.Join(stage, "video.fre.track2.sup")); err != nil {
+		t.Fatal("second PGS track missing", err)
 	}
 	extracted := filepath.Join(stage, "video.eng.track1.forced.default.sup")
 	got, err := os.ReadFile(extracted)
