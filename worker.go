@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -40,6 +41,7 @@ type MediaStream struct {
 	Primaries   string `json:"color_primaries"`
 	Disposition struct {
 		Default  int `json:"default"`
+		Forced   int `json:"forced"`
 		Attached int `json:"attached_pic"`
 	} `json:"disposition"`
 	Tags     map[string]string `json:"tags"`
@@ -479,6 +481,7 @@ func (w *Worker) process(job PrepareJob) error {
 	if hdrVideo(video) {
 		return fail("blocked", "HDR tone mapping is not supported yet")
 	}
+	hasPGS, unsupportedSubtitles := false, false
 	for _, stream := range probe.Streams {
 		if stream.Type == "audio" {
 			language := strings.ToLower(stream.Tags["language"])
@@ -487,10 +490,19 @@ func (w *Worker) process(job PrepareJob) error {
 			}
 			result.AudioLanguages = append(result.AudioLanguages, language)
 		}
-		if stream.Type == "subtitle" && stream.Codec != "subrip" && stream.Codec != "mov_text" {
-			result.Warning = "Image/styled subtitles remain in originals; choose external SRT for streaming."
+		if stream.Type == "subtitle" {
+			hasPGS = hasPGS || stream.Codec == "hdmv_pgs_subtitle"
+			unsupportedSubtitles = unsupportedSubtitles || subtitleFormat(stream.Codec) == ""
 		}
 	}
+	warnings := []string{}
+	if hasPGS {
+		warnings = append(warnings, "PGS subtitles preserved; web playback may require video transcoding.")
+	}
+	if unsupportedSubtitles {
+		warnings = append(warnings, "Unsupported image/styled subtitles remain in originals; choose external SRT for streaming.")
+	}
+	result.Warning = strings.Join(warnings, " ")
 	if result.Published {
 		if st, err := os.Stat(destination); err == nil && st.Mode().IsRegular() {
 			result.State = "indexing"
@@ -508,6 +520,7 @@ func (w *Worker) process(job PrepareJob) error {
 				return fail("failed", "video published; Jellyfin indexing failed")
 			}
 			result.State = "ready"
+			result.SubtitleVersion = subtitleVersion
 			return w.saveResult(job, result)
 		}
 		result.Published = false
@@ -584,6 +597,7 @@ func (w *Worker) process(job PrepareJob) error {
 		return fail("failed", "video published; Jellyfin indexing failed")
 	}
 	result.State = "ready"
+	result.SubtitleVersion = subtitleVersion
 	return w.saveResult(job, result)
 }
 func (w *Worker) stageSubtitles(ctx context.Context, job PrepareJob, probe MediaProbe, dir string) error {
@@ -604,7 +618,7 @@ func publishSidecars(dir, destination string) error {
 	// Versioned directory swaps would be needed for a fully atomic multi-file set.
 	for _, entry := range entries {
 		name := entry.Name()
-		if !strings.HasPrefix(name, "video.") || !strings.EqualFold(filepath.Ext(name), ".srt") {
+		if !strings.HasPrefix(name, "video.") || !subtitleSidecar(name) {
 			continue
 		}
 		target := base + strings.TrimPrefix(name, "video")
@@ -619,7 +633,7 @@ func publishSidecars(dir, destination string) error {
 	}
 	for _, entry := range old {
 		name := entry.Name()
-		if strings.HasPrefix(name, filepath.Base(base)+".") && strings.EqualFold(filepath.Ext(name), ".srt") && !published[name] {
+		if strings.HasPrefix(name, filepath.Base(base)+".") && subtitleSidecar(name) && !published[name] {
 			if err = os.Remove(filepath.Join(filepath.Dir(destination), name)); err != nil {
 				return err
 			}
@@ -641,7 +655,7 @@ func (w *Worker) syncSidecars(job PrepareJob) (bool, error) {
 	}
 	for _, entry := range entries {
 		source := filepath.Join(filepath.Dir(job.Source), entry.Name())
-		if !strings.HasPrefix(source, base+".") || !strings.EqualFold(filepath.Ext(source), ".srt") {
+		if !strings.HasPrefix(source, base+".") || !subtitleSidecar(source) {
 			continue
 		}
 		safe, err := sourcePath(w.Media, source)
@@ -652,7 +666,8 @@ func (w *Worker) syncSidecars(job PrepareJob) (bool, error) {
 		if err != nil {
 			return changed, err
 		}
-		if !st.Mode().IsRegular() || st.Size() > 10<<20 {
+		// Bound memory for sidecar comparisons; stream/hash if subtitles exceed 64 MiB.
+		if !st.Mode().IsRegular() || st.Size() > 64<<20 {
 			continue
 		}
 		data, err := os.ReadFile(safe)
@@ -674,6 +689,24 @@ func (w *Worker) syncSidecars(job PrepareJob) (bool, error) {
 	}
 	return changed, nil
 }
+
+// Increment when embedded subtitle publication changes, to backfill ready videos.
+const subtitleVersion = 1
+
+func subtitleFormat(codec string) string {
+	switch codec {
+	case "subrip", "mov_text":
+		return "srt"
+	case "hdmv_pgs_subtitle":
+		return "sup"
+	default:
+		return ""
+	}
+}
+func subtitleSidecar(path string) bool {
+	ext := strings.ToLower(filepath.Ext(path))
+	return ext == ".srt" || ext == ".sup"
+}
 func (w *Worker) syncSubtitles(ctx context.Context, job PrepareJob, probe MediaProbe) error {
 	if _, err := w.syncSidecars(job); err != nil {
 		return err
@@ -684,21 +717,37 @@ func (w *Worker) syncSubtitles(ctx context.Context, job PrepareJob, probe MediaP
 	}
 	outbase := strings.TrimSuffix(destination, filepath.Ext(destination))
 	for _, stream := range probe.Streams {
-		if stream.Type != "subtitle" || (stream.Codec != "subrip" && stream.Codec != "mov_text") {
+		format := subtitleFormat(stream.Codec)
+		if stream.Type != "subtitle" || format == "" {
 			continue
 		}
-		// Preserve styled/image subtitles in originals; never burn them into optimized video.
+		// PGS is copied losslessly to a sidecar; clients choose rendering or burn-in.
 		language := strings.ToLower(stream.Tags["language"])
 		if len(language) < 2 || len(language) > 3 || strings.IndexFunc(language, func(r rune) bool { return r < 'a' || r > 'z' }) >= 0 {
 			language = "und"
 		}
-		subtitle := fmt.Sprintf("%s.%s.track%d.srt", outbase, language, stream.Index)
+		flags := ""
+		if stream.Disposition.Forced != 0 {
+			flags += ".forced"
+		}
+		if stream.Disposition.Default != 0 {
+			flags += ".default"
+		}
+		subtitle := fmt.Sprintf("%s.%s.track%d%s.%s", outbase, language, stream.Index, flags, format)
 		tmp := subtitle + ".tmp"
-		cmd := exec.CommandContext(ctx, "ffmpeg", "-v", "error", "-nostdin", "-y", "-i", job.Source, "-map", fmt.Sprintf("0:%d", stream.Index), "-c:s", "srt", "-f", "srt", tmp)
+		codec := "srt"
+		if format == "sup" {
+			codec = "copy"
+		}
+		cmd := exec.CommandContext(ctx, "ffmpeg", "-v", "error", "-nostdin", "-y", "-i", job.Source, "-map", fmt.Sprintf("0:%d", stream.Index), "-c:s", codec, "-f", format, tmp)
 		cmd.Stderr = io.Discard
 		if cmd.Run() != nil {
 			_ = os.Remove(tmp)
 			return errors.New("subtitle extraction failed")
+		}
+		if err = os.Chmod(tmp, 0644); err != nil {
+			_ = os.Remove(tmp)
+			return err
 		}
 		if err = os.Rename(tmp, subtitle); err != nil {
 			return err
@@ -805,6 +854,47 @@ func (w *Worker) ensureIndexed(ctx context.Context, job PrepareJob) error {
 	}
 	return errors.New("Jellyfin has not indexed the output")
 }
+
+var preparedEpisodeNumber = regexp.MustCompile(` - S[0-9]+E([0-9]+)(?:-E[0-9]+)*\.mp4$`)
+
+func episodeNumber(job PrepareJob) int {
+	match := preparedEpisodeNumber.FindStringSubmatch(filepath.Base(job.Output))
+	if match == nil {
+		return -1
+	}
+	n, err := strconv.Atoi(match[1])
+	if err != nil {
+		return -1
+	}
+	return n
+}
+func orderPreparationJobs(jobs []PrepareJob) {
+	sort.Slice(jobs, func(i, j int) bool {
+		if jobs[i].Created != jobs[j].Created {
+			return jobs[i].Created < jobs[j].Created
+		}
+		return jobs[i].ID < jobs[j].ID
+	})
+	// Keep FIFO slots across unrelated titles, but fill each season's slots in
+	// episode order. This also repairs legacy queues created through map iteration.
+	seasons := map[string][]int{}
+	for i, job := range jobs {
+		if strings.HasPrefix(job.Output, "shows"+string(os.PathSeparator)) && episodeNumber(job) >= 0 {
+			season := filepath.Dir(job.Output)
+			seasons[season] = append(seasons[season], i)
+		}
+	}
+	for _, slots := range seasons {
+		ordered := make([]PrepareJob, len(slots))
+		for i, slot := range slots {
+			ordered[i] = jobs[slot]
+		}
+		sort.SliceStable(ordered, func(i, j int) bool { return episodeNumber(ordered[i]) < episodeNumber(ordered[j]) })
+		for i, slot := range slots {
+			jobs[slot] = ordered[i]
+		}
+	}
+}
 func (w *Worker) tick() error {
 	if err := w.cleanupTick(); err != nil {
 		return err
@@ -825,7 +915,7 @@ func (w *Worker) tick() error {
 		}
 		jobs = append(jobs, job)
 	}
-	sort.Slice(jobs, func(i, j int) bool { return jobs[i].Created < jobs[j].Created })
+	orderPreparationJobs(jobs)
 	for _, job := range jobs {
 		if w.cancelled(job) || w.superseded(job) {
 			if err := w.saveResult(job, PrepareResult{State: "cancelled", Detail: "cancelled or superseded"}); err != nil {
@@ -844,6 +934,10 @@ func (w *Worker) tick() error {
 					return w.process(job)
 				}
 				if sourceUnchanged(job, w.Media) {
+					if result.SubtitleVersion < subtitleVersion {
+						// Reuse the published video; only extract/publish missing subtitles.
+						return w.process(job)
+					}
 					changed, err := w.syncSidecars(job)
 					if err != nil {
 						return err

@@ -23,6 +23,23 @@ was used for the item-ID/menu/magnet fixes; archive that override when switching
 published images, otherwise Compose will keep selecting the local images. Rollback
 requires restoring the previous image pins and recreating these same two services.
 
+## Episode ordering and PGS subtitles
+
+The bot queues imported episodes in numeric order; the worker also repairs ordering
+for existing queues, retaining FIFO slots across unrelated titles. Running jobs are
+not interrupted for newly imported earlier episodes.
+
+PGS is extracted with FFmpeg stream-copy into language-tagged `.sup` sidecars beside
+the MP4, including forced/default flags. No OCR or new runtime dependency is used.
+Chrome requires Jellyfin subtitle burn-in/transcoding when PGS is selected. Existing
+ready jobs automatically extract/index missing embedded subtitles without replacing
+their published videos; no rebuild or download is needed. After release, verify
+`.sup` sidecars and external PGS streams in Jellyfin's media info for an already
+prepared episode. Unsupported image/styled codecs still remain in originals.
+
+Deploy after an active encode/validation completes to avoid restarting its work.
+Preserve the explicit NVIDIA device mappings in the workstation Compose file.
+
 ## GPU recovery
 
 The Gentlemen's preparation failed because the old container returned

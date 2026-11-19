@@ -242,10 +242,19 @@ network filesystem without revisiting locking/publication guarantees.
   mono/stereo or convert each track to 192 kbps AAC stereo. Surround originals remain
   available in the original library. Very large audio track sets can exceed the
   streaming bitrate budget and fail validation; no tracks are silently discarded.
-- Copy external SRT and extract embedded SubRip/mov_text with language labels.
-  Later Bazarr SRT additions/changes are mirrored without re-encoding. Image/styled
-  subtitles stay in originals; ready/status messages warn about this. No burn-in,
-  OCR, ASS styling conversion, or automatic HDR tone mapping. HDR is **blocked**.
+- Copy external SRT/PGS `.sup` and extract embedded SubRip/mov_text as SRT or PGS
+  losslessly as `.sup` sidecars, with language, forced and default flags. MP4 cannot
+  contain PGS, so Jellyfin indexes these alongside the video. Chrome needs server-side
+  burn-in when PGS is selected (video transcoding); compatible clients can render it
+  directly. No OCR or permanent burn-in during preparation. Other image/styled formats
+  remain in originals with a warning. Later external subtitle additions/changes are
+  mirrored without re-encoding; sidecars over 64 MiB are not mirrored.
+  Existing ready jobs automatically backfill embedded subtitles once without replacing
+  the prepared video. No ASS styling conversion or automatic HDR tone mapping; HDR is **blocked**.
+- Episodes available in a season are prepared in numeric episode order, including
+  multi-episode files and old queues created out of order. Unrelated titles retain
+  their FIFO queue slots. Missing/unimported episodes are not waited for, and active
+  encodes are not preempted when an earlier episode arrives.
 - One job at a time; queue/results survive restart. Interrupted jobs restart rather
   than trying to resume a partially encoded MP4. Sources are fingerprinted using
   path/size/mtime; this assumes immutable ARR imports.

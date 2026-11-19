@@ -26,14 +26,15 @@ type PrepareJob struct {
 	Rebuild    bool   `json:"rebuild,omitempty"`
 }
 type PrepareResult struct {
-	Generation     int64    `json:"generation"`
-	State          string   `json:"state"`
-	Action         string   `json:"action,omitempty"`
-	Progress       int      `json:"progress,omitempty"`
-	Detail         string   `json:"detail,omitempty"`
-	Published      bool     `json:"published,omitempty"`
-	Warning        string   `json:"warning,omitempty"`
-	AudioLanguages []string `json:"audio_languages,omitempty"`
+	Generation      int64    `json:"generation"`
+	State           string   `json:"state"`
+	Action          string   `json:"action,omitempty"`
+	Progress        int      `json:"progress,omitempty"`
+	Detail          string   `json:"detail,omitempty"`
+	Published       bool     `json:"published,omitempty"`
+	Warning         string   `json:"warning,omitempty"`
+	AudioLanguages  []string `json:"audio_languages,omitempty"`
+	SubtitleVersion int      `json:"subtitle_version,omitempty"`
 }
 type PreparationRef struct {
 	ID         string `json:"id"`
@@ -248,7 +249,20 @@ func (b *Bot) discoverPreparation(index int) error {
 	if err != nil && len(byFile) > 0 {
 		return err
 	}
+	fileIDs := make([]int, 0, len(byFile))
 	for fid, nums := range byFile {
+		sort.Ints(nums)
+		fileIDs = append(fileIDs, fid)
+	}
+	sort.Slice(fileIDs, func(i, j int) bool {
+		left, right := fileIDs[i], fileIDs[j]
+		if byFile[left][0] != byFile[right][0] {
+			return byFile[left][0] < byFile[right][0]
+		}
+		return left < right
+	})
+	for _, fid := range fileIDs {
+		nums := byFile[fid]
 		if _, err = confined(b.cfg.Series.Root, libraryRel); err != nil {
 			return err
 		}
@@ -260,7 +274,6 @@ func (b *Bot) discoverPreparation(index int) error {
 		if !ok {
 			return errors.New("episode file path missing")
 		}
-		sort.Ints(nums)
 		label := fmt.Sprintf("%s — S%02dE%02d", req.Label, req.Season, nums[0])
 		basename := fmt.Sprintf("%s - S%02dE%02d", filepath.Base(dir), req.Season, nums[0])
 		for _, n := range nums[1:] {
